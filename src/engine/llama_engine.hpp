@@ -108,6 +108,10 @@ class ModelManager {
     const llama_vocab* _vocab;
 
     ModelManager() {
+        // Dynamic ggml builds do not register a CPU backend until the best
+        // compatible module is loaded. The default search includes the service
+        // executable directory, where the MSI installs all backend DLLs.
+        ggml_backend_load_all();
         llama_backend_init();
         auto path = CorePaths::model_path().string();
         auto model_params = llama_model_default_params();
