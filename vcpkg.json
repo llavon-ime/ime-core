@@ -7,6 +7,17 @@
     "utfcpp"
   ],
   "features": {
+    "llama-cuda": {
+      "description": "Build llama.cpp with CUDA backend for GPU offload.",
+      "dependencies": [
+        {
+          "name": "ggml",
+          "features": [
+            "cuda"
+          ]
+        }
+      ]
+    },
     "llama-vulkan": {
       "description": "Build llama.cpp with Vulkan backend for GPU offload.",
       "dependencies": [

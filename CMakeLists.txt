@@ -23,6 +23,7 @@ endif()
 add_library(ime-core STATIC
     src/core.cpp
     include/ime-core/core.hpp
+    include/ime-core/logger.hpp
     src/bopomofo/bopomofo.hpp
     src/engine/engine.hpp
     src/engine/llama_engine.hpp

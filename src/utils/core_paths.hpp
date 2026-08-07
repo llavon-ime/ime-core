@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ime-core/core.hpp>
+
 #include <filesystem>
 #include <cstdint>
 #include <optional>
@@ -15,11 +17,14 @@ class CorePaths {
         std::uint32_t context_length = 0;
         std::uint32_t threads = 8;
         int gpu_layers = -2;
+        InferenceDeviceSelection inference_device;
     };
 
 public:
     static void configure(std::filesystem::path model_path, std::filesystem::path tables_dir,
-                          std::uint32_t context_length = 0, std::uint32_t threads = 8, int gpu_layers = -2) {
+                          std::uint32_t context_length = 0, std::uint32_t threads = 8,
+                          int gpu_layers = -2,
+                          InferenceDeviceSelection inference_device = {}) {
         model_path = normalize(std::move(model_path));
         tables_dir = normalize(std::move(tables_dir));
 
@@ -38,7 +43,8 @@ public:
         require_file(tables_dir / "bopomofo_char.json");
 
         if (threads == 0) throw std::runtime_error("threads must be positive");
-        storage() = Paths{std::move(model_path), std::move(tables_dir), context_length, threads, gpu_layers};
+        storage() = Paths{std::move(model_path), std::move(tables_dir), context_length,
+                          threads, gpu_layers, std::move(inference_device)};
     }
 
     static const std::filesystem::path& model_path() {
@@ -56,6 +62,9 @@ public:
     static std::uint32_t context_length() { return configured().context_length; }
     static std::uint32_t threads() { return configured().threads; }
     static int gpu_layers() { return configured().gpu_layers; }
+    static const InferenceDeviceSelection& inference_device() {
+        return configured().inference_device;
+    }
 
 private:
     static std::optional<Paths>& storage() {
