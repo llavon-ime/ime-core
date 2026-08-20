@@ -7,7 +7,9 @@ namespace llavon::ime::core {
 
 class Logger {
 public:
-    using MessageFactory = std::move_only_function<std::string()>;
+    // std::function instead of std::move_only_function: libc++ (Apple
+    // toolchains) does not implement P0288.
+    using MessageFactory = std::function<std::string()>;
 
     virtual ~Logger() = default;
 
