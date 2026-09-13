@@ -115,6 +115,9 @@ private:
         if (registry_name.find("vulkan") != std::string::npos) {
             return InferenceBackend::vulkan;
         }
+        if (registry_name.find("metal") != std::string::npos) {
+            return InferenceBackend::metal;
+        }
         return std::nullopt;
     }
 
@@ -178,13 +181,15 @@ private:
     static int backend_priority(InferenceBackend backend) {
         if (backend == InferenceBackend::cuda) return 0;
         if (backend == InferenceBackend::vulkan) return 1;
-        return 2;
+        if (backend == InferenceBackend::metal) return 2;
+        return 3;
     }
 
     static const char* inference_backend_name(InferenceBackend backend) {
         if (backend == InferenceBackend::cpu) return "CPU";
         if (backend == InferenceBackend::cuda) return "CUDA";
         if (backend == InferenceBackend::vulkan) return "Vulkan";
+        if (backend == InferenceBackend::metal) return "Metal";
         return "automatic";
     }
 
