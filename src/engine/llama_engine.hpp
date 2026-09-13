@@ -264,6 +264,13 @@ private:
             model_params.n_gpu_layers = requested_gpu_layers == -2 || requested_gpu_layers == -1 ? -1 : requested_gpu_layers;
             model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
             model_params.main_gpu = 0;
+        } else {
+            // llama.cpp defaults to using every available accelerator and to
+            // offloading all layers. Supply an explicitly empty device list as
+            // well as zero GPU layers so CPU mode (and GPU fallback) cannot
+            // silently initialize or execute on an accelerator.
+            model_params.devices = offload_devices.data();
+            model_params.n_gpu_layers = 0;
         }
 
         std::clog << "[CORE] loading model: " << path << '\n';
