@@ -389,6 +389,7 @@ public:
             return;
         }
 
+        const auto warmup_start = std::chrono::steady_clock::now();
         if (!warmup_ctx) {
             warmup_ctx.reset(ModelManager::instance().new_context(8, 1));
         }
@@ -396,7 +397,6 @@ public:
         llama_token token = warmup_token();
         llama_set_warmup(warmup_ctx.get(), true);
         llama_batch batch = make_token_batch(&token, 1, 0, false);
-        const auto warmup_start = std::chrono::steady_clock::now();
         int rc = llama_decode(warmup_ctx.get(), batch);
         llama_synchronize(warmup_ctx.get());
         llama_batch_free(batch);
