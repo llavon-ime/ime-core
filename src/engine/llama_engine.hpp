@@ -702,6 +702,13 @@ private:
             common++;
         }
 
+        // Truncating cached guess tokens does not refresh llama.cpp's output
+        // logits. Re-decode the last retained prompt token so the first
+        // candidate is conditioned on the shortened sequence.
+        if (common == new_tokens.size() && common < prev_tokens.size() && common > 0) {
+            --common;
+        }
+
 #if IME_CORE_TRACE_PREDICT
         const auto previous_count = prev_tokens.size();
         const auto current_count = new_tokens.size();
@@ -718,9 +725,11 @@ private:
                 return std::format("[CORE] seq_rm from={} result={}", common,
                                    ok ? "ok" : "FAIL");
             });
-#else
-            (void)ok;
 #endif
+            if (!ok) {
+                llama_memory_clear(mem, true);
+                common = 0;
+            }
             prev_tokens.resize(common);
         }
         next_pos = static_cast<llama_pos>(common);
