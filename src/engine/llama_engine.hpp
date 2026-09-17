@@ -370,6 +370,7 @@ class LlamaEngine : public IEngine {
         size_t candidate_tokens = 0;
         size_t mask_calls = 0;
         size_t decode_calls = 0;
+        size_t step_tokens = 0;
     };
 
 public:
@@ -441,46 +442,33 @@ public:
         timing.log_us += elapsed_us(request_log_start);
 #endif
 
-        const auto cache_start = std::chrono::steady_clock::now();
-        ensure_cache_aligned(new_tokens, timing);
-        timing.cache_us += elapsed_us(cache_start);
+        struct PreparedEntry {
+            std::vector<llama_token> candidates;
+            std::map<llama_token, char32_t> inverse;
+            llama_token chosen = -1;
+        };
 
-        std::vector<PredictResult> results;
-        results.reserve(padding.size());
-
+        std::vector<PreparedEntry> prepared(padding.size());
+        bool needs_logits = false;
         for (size_t pi = 0; pi < padding.size(); pi++) {
-            auto& entry = padding[pi];
-            PredictResult r;
+            const auto& entry = padding[pi];
+            auto& work = prepared[pi];
+            const auto candidate_start = std::chrono::steady_clock::now();
             if (!entry.is_chosen) {
-                const auto candidate_start = std::chrono::steady_clock::now();
                 auto candidates = hanzi_map_->lookup_all(entry.bpmf);
                 if (!candidates.empty()) {
-                    std::vector<llama_token> cand_tokens;
-                    std::map<llama_token, char32_t> inv;
                     for (auto c : candidates) {
                         auto t = tok.map_char(c);
                         if (t != -1) {
-                            cand_tokens.push_back(t);
-                            inv[t] = c;
+                            work.candidates.push_back(t);
+                            work.inverse[t] = c;
                         }
                     }
-                    timing.candidate_us += elapsed_us(candidate_start);
-                    timing.candidate_tokens += cand_tokens.size();
-                    if (!cand_tokens.empty()) {
-                        auto probs = masked_predict(cand_tokens, timing);
-                        for (auto& [token, prob] : probs) r.candidates.push_back({inv[token], prob});
-
-#if IME_CORE_TRACE_PREDICT
-                        const auto top_log_start = std::chrono::steady_clock::now();
-                        debug_top5(pi, entry, probs, inv);
-                        timing.log_us += elapsed_us(top_log_start);
-#endif
-
-                        llama_token best = static_cast<llama_token>(probs.front().token);
-                        decode_one(best, timing);
-                    }
-                } else {
-                    timing.candidate_us += elapsed_us(candidate_start);
+                    timing.candidate_tokens += work.candidates.size();
+                    needs_logits = needs_logits || !work.candidates.empty();
+                }
+                timing.candidate_us += elapsed_us(candidate_start);
+                if (candidates.empty()) {
 #if IME_CORE_TRACE_PREDICT
                     const auto no_candidate_log_start = std::chrono::steady_clock::now();
                     debug_no_candidates(pi, entry);
@@ -488,19 +476,63 @@ public:
 #endif
                 }
             } else {
-                const auto candidate_start = std::chrono::steady_clock::now();
-                auto t = tok.map_char(entry.chosen_char);
+                work.chosen = tok.map_char(entry.chosen_char);
+                timing.candidate_tokens += (work.chosen == -1) ? 0 : 1;
                 timing.candidate_us += elapsed_us(candidate_start);
-                timing.candidate_tokens += (t == -1) ? 0 : 1;
 
 #if IME_CORE_TRACE_PREDICT
                 const auto chosen_log_start = std::chrono::steady_clock::now();
-                debug_chosen(pi, entry, t);
+                debug_chosen(pi, entry, work.chosen);
                 timing.log_us += elapsed_us(chosen_log_start);
 #endif
-                if (t != -1) decode_one(t, timing);
             }
-            results.push_back(std::move(r));
+        }
+
+        std::vector<PredictResult> results(padding.size());
+        if (!needs_logits) {
+            const auto total_us = elapsed_us(predict_start);
+            logger_->log([timing, total_us] { return format_timing(total_us, timing); });
+#if IME_CORE_TRACE_PREDICT
+            logger_->log("[CORE] predict done");
+#endif
+            return results;
+        }
+
+        const auto cache_start = std::chrono::steady_clock::now();
+        ensure_cache_aligned(new_tokens, timing);
+        timing.cache_us += elapsed_us(cache_start);
+
+        // Selected and explicitly chosen tokens only need to enter the KV cache
+        // if a later unresolved position needs logits conditioned on them.  Keep
+        // them pending so adjacent tokens share one decode, and deliberately do
+        // not decode the final prediction after the last logits read.
+        std::vector<llama_token> pending_tokens;
+        pending_tokens.reserve(padding.size());
+
+        for (size_t pi = 0; pi < padding.size(); pi++) {
+            const auto& entry = padding[pi];
+            const auto& work = prepared[pi];
+            auto& result = results[pi];
+
+            if (entry.is_chosen) {
+                if (work.chosen != -1) pending_tokens.push_back(work.chosen);
+                continue;
+            }
+            if (work.candidates.empty()) continue;
+
+            decode_pending(pending_tokens, timing);
+            auto probs = masked_predict(work.candidates, timing);
+            for (auto& [token, prob] : probs) {
+                result.candidates.push_back({work.inverse.at(token), prob});
+            }
+
+#if IME_CORE_TRACE_PREDICT
+            const auto top_log_start = std::chrono::steady_clock::now();
+            debug_top5(pi, entry, probs, work.inverse);
+            timing.log_us += elapsed_us(top_log_start);
+#endif
+
+            pending_tokens.push_back(static_cast<llama_token>(probs.front().token));
         }
 
         const auto total_us = elapsed_us(predict_start);
@@ -549,14 +581,15 @@ private:
             "cache_batch_ms={:.3f} cache_decode_ms={:.3f} cache_sync_ms={:.3f} "
             "candidate_ms={:.3f} mask_ms={:.3f} step_batch_ms={:.3f} "
             "step_decode_ms={:.3f} step_sync_ms={:.3f} log_ms={:.3f} "
-            "cache_tokens={} candidate_tokens={} mask_calls={} decode_calls={}",
+            "cache_tokens={} candidate_tokens={} mask_calls={} decode_calls={} step_tokens={}",
             milliseconds(total_us), milliseconds(timing.tokenize_us),
             milliseconds(timing.cache_us), milliseconds(timing.cache_batch_us),
             milliseconds(timing.cache_decode_us), milliseconds(timing.cache_sync_us),
             milliseconds(timing.candidate_us), milliseconds(timing.mask_us),
             milliseconds(timing.step_batch_us), milliseconds(timing.step_decode_us),
             milliseconds(timing.step_sync_us), milliseconds(timing.log_us),
-            timing.cache_tokens, timing.candidate_tokens, timing.mask_calls, timing.decode_calls);
+            timing.cache_tokens, timing.candidate_tokens, timing.mask_calls, timing.decode_calls,
+            timing.step_tokens);
     }
 
     void log_slow_decode(const char* stage, llama_pos pos, size_t token_count, llama_token last_token,
@@ -669,9 +702,11 @@ private:
         return batch;
     }
 
-    void decode_one(llama_token token, PredictTiming& timing) {
+    void decode_pending(std::vector<llama_token>& tokens, PredictTiming& timing) {
+        if (tokens.empty()) return;
+
         const auto batch_start = std::chrono::steady_clock::now();
-        llama_batch batch = make_token_batch(&token, 1, next_pos, true);
+        llama_batch batch = make_token_batch(tokens.data(), tokens.size(), next_pos, true);
         timing.step_batch_us += elapsed_us(batch_start);
 
         const auto decode_start = std::chrono::steady_clock::now();
@@ -684,16 +719,18 @@ private:
         llama_synchronize(llama_ctx.get());
         const long long sync_us = elapsed_us(sync_start);
         timing.step_sync_us += sync_us;
-        log_slow_decode("step", next_pos, 1, token, decode_us, sync_us);
+        log_slow_decode("step", next_pos, tokens.size(), tokens.back(), decode_us, sync_us);
 
         const auto free_start = std::chrono::steady_clock::now();
         llama_batch_free(batch);
         timing.step_batch_us += elapsed_us(free_start);
         timing.decode_calls++;
-        if (rc != 0) throw std::runtime_error("llama_decode failed in decode_one");
+        timing.step_tokens += tokens.size();
+        if (rc != 0) throw std::runtime_error("llama_decode failed in decode_pending");
 
-        ++next_pos;
-        prev_tokens.push_back(token);
+        next_pos += static_cast<llama_pos>(tokens.size());
+        prev_tokens.insert(prev_tokens.end(), tokens.begin(), tokens.end());
+        tokens.clear();
     }
 
     void ensure_cache_aligned(const std::vector<int>& new_tokens, PredictTiming& timing) {
