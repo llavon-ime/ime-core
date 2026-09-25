@@ -1,13 +1,12 @@
 # IME Core
 
-Cross-platform static C++ inference library for Llavon IME. This project owns model loading,
-tokenization, candidate masking, llama.cpp inference, and per-client inference
-sessions. It contains no service IPC, process startup, or operating-system
-specific path discovery.
+Llavon IME 的跨平台靜態 C++ 推論函式庫。本專案負責模型載入、斷詞、候選遮蔽
+（candidate masking）、llama.cpp 推論與每位客戶端的推論 session；不含服務
+IPC、處理程序啟動或作業系統特定的路徑探索。
 
-## Build
+## 建置
 
-Pass a vcpkg toolchain from the caller:
+由呼叫端傳入 vcpkg 工具鏈：
 
 ```powershell
 cmake --preset windows -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
@@ -15,23 +14,21 @@ cmake --build --preset windows
 cmake --install build/windows --config Release
 ```
 
-The installed CMake package exports the static target `ime-core::ime-core`.
+安裝後的 CMake 套件會匯出靜態 target `ime-core::ime-core`。
 
-## Core data
+## 核心資料
 
-`CoreConfig` requires a GGUF model path and a tables directory. The installed
-reference tables are placed under `share/ime-core/tables`.
+`CoreConfig` 需要 GGUF 模型路徑與表目錄。安裝的參考表會放在
+`share/ime-core/tables` 下。
 
-Inference-device selection is supplied as data through `CoreConfig`.
-`enumerate_inference_devices()` reports devices exposed by the loaded ggml
-backends without loading a model. The core does not locate or parse application
-settings files.
+推論裝置的選擇以資料形式透過 `CoreConfig` 提供。
+`enumerate_inference_devices()` 會回報已載入的 ggml 後端所暴露的裝置，且不需
+載入模型。核心不會尋找或解析應用程式的設定檔。
 
-## Logging
+## 日誌
 
-`CoreConfig::logger` accepts an optional implementation of the platform-neutral
-`Logger` interface. `Logger::log(std::string)` handles messages that already
-exist, while `Logger::log(MessageFactory)` defers expensive formatting. A
-logger must never evaluate a message factory on the calling thread, and must
-not evaluate it at all when logging is disabled or the message is rejected.
-The core contains no logging thread, queue, pipe, or platform transport.
+`CoreConfig::logger` 可接受平台中立的 `Logger` 介面的選用實作。
+`Logger::log(std::string)` 處理已經存在的訊息，`Logger::log(MessageFactory)`
+則延後昂貴的格式化。logger 絕不能在呼叫端執行緒上求值 message factory，且在
+日誌停用或訊息被拒絕時完全不得求值。核心不含日誌執行緒、佇列、pipe 或平台
+傳輸。
