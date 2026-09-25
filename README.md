@@ -27,7 +27,7 @@ cmake --install build/windows --config Release
 
 ## 日誌
 
-`CoreConfig::logger` 可接受平台中立的 `Logger` 介面的選用實作。
+`CoreConfig::logger` 可接受平台無關的 `Logger` 介面的選用實作。
 `Logger::log(std::string)` 處理已經存在的訊息，`Logger::log(MessageFactory)`
 則延後昂貴的格式化。logger 絕不能在呼叫端執行緒上求值 message factory，且在
 日誌停用或訊息被拒絕時完全不得求值。核心不含日誌執行緒、佇列、pipe 或平台
