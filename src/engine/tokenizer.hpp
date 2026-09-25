@@ -2,9 +2,12 @@
 
 #include <utf8/cpp20.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <rfl/json.hpp>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -28,16 +31,32 @@ class Tokenizer {
     std::unordered_map<std::string, int> bpmf_table;
 
 public:
-    explicit Tokenizer(const CorePaths& paths) {
+    explicit Tokenizer(const std::filesystem::path& tables_dir) {
+        const auto tokens = tables_dir / "tokens";
         char_table =
-            rfl::json::load<std::unordered_map<std::string, int>>(paths.token_table_path("chars.json").string()).value();
+            rfl::json::load<std::unordered_map<std::string, int>>((tokens / "chars.json").string()).value();
         latin_table =
-            rfl::json::load<std::unordered_map<std::string, int>>(paths.token_table_path("latin.json").string()).value();
+            rfl::json::load<std::unordered_map<std::string, int>>((tokens / "latin.json").string()).value();
         special_table =
-            rfl::json::load<std::unordered_map<std::string, int>>(paths.token_table_path("special_tokens.json").string())
+            rfl::json::load<std::unordered_map<std::string, int>>((tokens / "special_tokens.json").string())
                 .value();
         bpmf_table =
-            rfl::json::load<std::unordered_map<std::string, int>>(paths.token_table_path("bpmf.json").string()).value();
+            rfl::json::load<std::unordered_map<std::string, int>>((tokens / "bpmf.json").string()).value();
+    }
+
+    explicit Tokenizer(const CorePaths& paths) : Tokenizer(paths.tables_dir()) {}
+
+    int pad_token_id() const { return special_table.at("<PAD>"); }
+    int unknown_token_id() const { return special_table.at("<UNK>"); }
+
+    bool tokens_fit_vocabulary(std::int64_t vocabulary_size) const {
+        if (vocabulary_size <= 0) return false;
+        const auto fits = [vocabulary_size](const auto& table) {
+            return std::ranges::all_of(table | std::views::values,
+                [vocabulary_size](int id) { return id >= 0 && id < vocabulary_size; });
+        };
+        return fits(char_table) && fits(latin_table) &&
+               fits(special_table) && fits(bpmf_table);
     }
 
     static bool is_alpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }

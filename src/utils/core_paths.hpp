@@ -40,14 +40,7 @@ public:
     }
 
     const std::filesystem::path& model_path() const noexcept { return model_path_; }
-
-    std::filesystem::path token_table_path(const char* filename) const {
-        return tables_dir_ / "tokens" / filename;
-    }
-
-    std::filesystem::path bopomofo_table_path() const {
-        return tables_dir_ / "bopomofo_char.json";
-    }
+    const std::filesystem::path& tables_dir() const noexcept { return tables_dir_; }
 
     std::uint32_t context_length() const noexcept { return context_length_; }
     std::uint32_t threads() const noexcept { return threads_; }

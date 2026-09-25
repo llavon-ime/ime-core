@@ -22,7 +22,9 @@ endif()
 
 add_library(ime-core STATIC
     src/core.cpp
+    src/encoding_tables.cpp
     include/ime-core/core.hpp
+    include/ime-core/encoding_tables.hpp
     include/ime-core/logger.hpp
     src/bopomofo/bopomofo.hpp
     src/engine/engine.hpp

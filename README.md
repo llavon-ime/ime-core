@@ -5,6 +5,9 @@ tokenization, candidate masking, llama.cpp inference, and per-client inference
 sessions. It contains no service IPC, process startup, or operating-system
 specific path discovery.
 
+`EncodingTables` exposes the inference tokenizer and Bopomofo candidate table
+to offline dataset builders without loading a model.
+
 ## Build
 
 Pass a vcpkg toolchain from the caller:
