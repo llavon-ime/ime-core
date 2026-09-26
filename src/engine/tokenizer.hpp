@@ -124,8 +124,9 @@ public:
                     res.push_back(special_table.at("<UNK>"));
                 }
             } else {
-                std::string s8 = utf8::utf16to8(entry.bpmf);
-                s8 = "<" + s8 + ">";
+                std::string s8 = "<" + utf8::utf16to8(entry.bpmf) + ">";
+                if (s8 == "<ㄋㄜ >") s8 = "<ㄋㄜ˙>";
+                if (s8 == "<ㄌㄜ >") s8 = "<ㄌㄜ˙>";
                 if (!bpmf_table.contains(s8)) {
                     throw std::logic_error("invalid bpmf: " + s8);
                 }
