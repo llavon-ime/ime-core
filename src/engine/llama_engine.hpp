@@ -388,7 +388,7 @@ public:
         llama_ctx.reset(model_manager_->new_context());
         mem = llama_get_memory(llama_ctx.get());
         llama_memory_clear(mem, true);
-        logger_->log("[CORE] engine ready");
+        logger_->log(LogInformation::general, "[CORE] engine ready");
     }
 
     void ready() override {
@@ -414,6 +414,7 @@ public:
         if (rc == 0) mark_backend_touch();
         const auto warmup_us = elapsed_us(warmup_start);
         logger_->log(
+            LogInformation::general,
             std::format("[TIME] ready_warmup_ms={:.3f}", milliseconds(warmup_us)));
         if (rc != 0) throw std::runtime_error("llama_decode failed in ready warmup");
     }
@@ -428,6 +429,16 @@ public:
         std::vector<int> new_tokens = tok.tokenize(context, padding);
         timing.tokenize_us += elapsed_us(tokenize_start);
 
+        logger_->log(
+            LogInformation::context,
+            [tokenizer = tokenizer_, context, tokens = new_tokens,
+             padding_count = padding.size()] {
+                const std::string captured = utf8::utf16to8(context);
+                const std::string round_trip = utf8::utf16to8(
+                    tokenizer->detokenize_context(tokens, padding_count));
+                return std::to_string(captured.size()) + '\n' + captured + round_trip;
+            });
+
 #if IME_CORE_TRACE_PREDICT
         const auto request_log_start = std::chrono::steady_clock::now();
         debug_request(context, padding, new_tokens);
@@ -435,10 +446,12 @@ public:
         const auto context_length = context.size();
         const auto padding_count = padding.size();
         const auto token_count = new_tokens.size();
-        logger_->log([context_length, padding_count, token_count] {
-            return std::format("[CORE] predict ctx_len={} pad_cnt={} tokens={}",
-                               context_length, padding_count, token_count);
-        });
+        logger_->log(LogInformation::general,
+                     [context_length, padding_count, token_count] {
+                         return std::format(
+                             "[CORE] predict ctx_len={} pad_cnt={} tokens={}",
+                             context_length, padding_count, token_count);
+                     });
         timing.log_us += elapsed_us(request_log_start);
 #endif
 
@@ -491,9 +504,10 @@ public:
         std::vector<PredictResult> results(padding.size());
         if (!needs_logits) {
             const auto total_us = elapsed_us(predict_start);
-            logger_->log([timing, total_us] { return format_timing(total_us, timing); });
+            logger_->log(LogInformation::general,
+                         [timing, total_us] { return format_timing(total_us, timing); });
 #if IME_CORE_TRACE_PREDICT
-            logger_->log("[CORE] predict done");
+            logger_->log(LogInformation::general, "[CORE] predict done");
 #endif
             return results;
         }
@@ -536,9 +550,10 @@ public:
         }
 
         const auto total_us = elapsed_us(predict_start);
-        logger_->log([timing, total_us] { return format_timing(total_us, timing); });
+        logger_->log(LogInformation::general,
+                     [timing, total_us] { return format_timing(total_us, timing); });
 #if IME_CORE_TRACE_PREDICT
-        logger_->log("[CORE] predict done");
+        logger_->log(LogInformation::general, "[CORE] predict done");
 #endif
         return results;
     }
@@ -598,7 +613,8 @@ private:
         if (total_us < kSlowDecodeLogThresholdUs) return;
 
         const std::string stage_name(stage);
-        logger_->log([stage_name, pos, token_count, last_token, decode_us, sync_us, total_us] {
+        logger_->log(LogInformation::general,
+                     [stage_name, pos, token_count, last_token, decode_us, sync_us, total_us] {
             return std::format(
                 "[TIME] slow_decode stage={} pos={} tokens={} last_token={} "
                 "decode_ms={:.3f} sync_ms={:.3f} total_ms={:.3f}",
@@ -625,7 +641,7 @@ private:
 
     void debug_request(const std::u16string& context, const std::vector<PaddingEntry>& padding,
                        const std::vector<int>& tokens) {
-        logger_->log([context, padding, tokens] {
+        logger_->log(LogInformation::general, [context, padding, tokens] {
             std::string padding_text;
             for (const auto& entry : padding) padding_text += describe_padding(entry);
             std::string token_text;
@@ -640,7 +656,7 @@ private:
 
     void debug_top5(size_t pos, const PaddingEntry& entry, const std::vector<TokenProb>& probs,
                     const std::map<llama_token, char32_t>& inv) {
-        logger_->log([pos, entry, probs, inv] {
+        logger_->log(LogInformation::general, [pos, entry, probs, inv] {
             std::string top5;
             const size_t count = std::min<size_t>(5, probs.size());
             for (size_t i = 0; i < count; ++i) {
@@ -656,14 +672,14 @@ private:
     }
 
     void debug_no_candidates(size_t pos, const PaddingEntry& entry) {
-        logger_->log([pos, entry] {
+        logger_->log(LogInformation::general, [pos, entry] {
             return std::format("[POS {}] bpmf=\"{}\" top5=<no candidates>", pos,
                                to_utf8(entry.bpmf));
         });
     }
 
     void debug_chosen(size_t pos, const PaddingEntry& entry, int token) {
-        logger_->log([pos, entry, token] {
+        logger_->log(LogInformation::general, [pos, entry, token] {
             return std::format("[POS {}] chosen=\"{}\" token={}", pos,
                                to_utf8(entry.chosen_char), token);
         });
@@ -749,7 +765,7 @@ private:
 #if IME_CORE_TRACE_PREDICT
         const auto previous_count = prev_tokens.size();
         const auto current_count = new_tokens.size();
-        logger_->log([previous_count, current_count, common] {
+        logger_->log(LogInformation::general, [previous_count, current_count, common] {
             return std::format("[CORE] cache prev={} new={} common={}", previous_count,
                                current_count, common);
         });
@@ -758,7 +774,7 @@ private:
         if (common < prev_tokens.size()) {
             bool ok = llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1);
 #if IME_CORE_TRACE_PREDICT
-            logger_->log([common, ok] {
+            logger_->log(LogInformation::general, [common, ok] {
                 return std::format("[CORE] seq_rm from={} result={}", common,
                                    ok ? "ok" : "FAIL");
             });

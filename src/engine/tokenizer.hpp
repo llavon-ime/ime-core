@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <rfl/json.hpp>
 #include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,17 @@ class Tokenizer {
     std::unordered_map<std::string, int> latin_table;
     std::unordered_map<std::string, int> special_table;
     std::unordered_map<std::string, int> bpmf_table;
+    std::unordered_map<int, std::string> inverse_table;
+
+    template <typename Table>
+    void add_inverse_tokens(const Table& table) {
+        for (const auto& [text, token] : table) {
+            const auto [existing, inserted] = inverse_table.emplace(token, text);
+            if (!inserted && existing->second != text) {
+                throw std::logic_error("duplicate token id in tokenizer tables");
+            }
+        }
+    }
 
 public:
     explicit Tokenizer(const std::filesystem::path& tables_dir) {
@@ -42,6 +54,11 @@ public:
                 .value();
         bpmf_table =
             rfl::json::load<std::unordered_map<std::string, int>>((tokens / "bpmf.json").string()).value();
+
+        add_inverse_tokens(char_table);
+        add_inverse_tokens(latin_table);
+        add_inverse_tokens(special_table);
+        add_inverse_tokens(bpmf_table);
     }
 
     explicit Tokenizer(const CorePaths& paths) : Tokenizer(paths.tables_dir()) {}
@@ -135,6 +152,27 @@ public:
         }
         res.push_back(special_table.at("<SEP>"));
         return res;
+    }
+
+    std::u16string detokenize_context(std::span<const int> tokens,
+                                      std::size_t padding_count) const {
+        // tokenize() emits BOS, context, padding, SEP in that order. Decode
+        // only the context range so the result is directly comparable with
+        // the text acquired from TSF.
+        if (tokens.size() < padding_count + 2) return {};
+
+        const auto first = tokens.begin() + 1;
+        const auto last = tokens.end() - static_cast<std::ptrdiff_t>(padding_count) - 1;
+        std::string text;
+        for (auto token = first; token != last; ++token) {
+            if (*token == special_table.at("<SP>")) {
+                text.push_back(' ');
+                continue;
+            }
+            const auto found = inverse_table.find(*token);
+            if (found != inverse_table.end()) text += found->second;
+        }
+        return utf8::utf8to16(text);
     }
 };
 
