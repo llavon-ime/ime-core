@@ -49,6 +49,9 @@ struct InferenceRuntimeInfo {
 struct CoreConfig {
     std::filesystem::path model_path;
     std::filesystem::path tables_dir;
+    // Empty disables persistent Vulkan pipeline caching. The host owns the
+    // platform-specific location policy and must pass a directory explicitly.
+    std::filesystem::path vulkan_pipeline_cache_dir;
     std::uint32_t context_length = 0;
     std::uint32_t threads = 8;
     int gpu_layers = -2;

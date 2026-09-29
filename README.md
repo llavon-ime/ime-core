@@ -14,13 +14,14 @@ covers small inference batches and populated KV caches, then clears the
 synthetic state and gives the prepared context to the first session. This
 avoids deferring expensive pipeline creation to the first few keystrokes.
 It increases model-load time and does not run periodically while idle.
-When the Windows host supplies the patched ggml backend, the core saves its
-pipeline cache after preparation. That backend loads compatible compiled
-data on the next process start; the core remains compatible with unpatched
-ggml builds through an optional registry-function lookup.
+When a host supplies `CoreConfig::vulkan_pipeline_cache_dir`, the core
+configures the Vulkan backend before model loading and saves its pipeline cache
+after preparation. An empty path disables persistent caching. The core remains
+compatible with backends without this optional registry-function extension.
 
 Set `IME_CORE_BUILD_TOOLS=ON` to build `ime-core-latency-check`. Run it with
-`MODEL_PATH TABLES_DIRECTORY VULKAN_DEVICE_ID` (for example, `Vulkan0`). It
+`MODEL_PATH TABLES_DIRECTORY VULKAN_DEVICE_ID` (for example, `Vulkan0`). Pass
+`--cache-dir DIRECTORY` to opt in to persistent pipeline caching. The tool
 checks two fresh sessions, varying context lengths, 250 ms spacing, and
 2.3-second idle resumes. Every request is reported, including the first;
 candidate output is included for before/after correctness comparison.

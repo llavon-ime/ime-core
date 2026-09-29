@@ -277,6 +277,25 @@ public:
             model_params.n_gpu_layers = requested_gpu_layers == -2 || requested_gpu_layers == -1 ? -1 : requested_gpu_layers;
             model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
             model_params.main_gpu = 0;
+
+            if (offload_device.backend == InferenceBackend::vulkan &&
+                !paths_->vulkan_pipeline_cache_dir().empty()) {
+                const auto registry = ggml_backend_dev_backend_reg(offload_device.device);
+                using ConfigurePipelineCache = bool (*)(ggml_backend_dev_t, const char*);
+                const auto configure_cache = reinterpret_cast<ConfigurePipelineCache>(
+                    ggml_backend_reg_get_proc_address(
+                        registry, "ggml_backend_vk_set_pipeline_cache_directory"));
+                if (configure_cache) {
+                    const auto encoded = paths_->vulkan_pipeline_cache_dir().u8string();
+                    const std::string directory(
+                        reinterpret_cast<const char*>(encoded.data()), encoded.size());
+                    if (!configure_cache(offload_device.device, directory.c_str())) {
+                        std::clog << "[CORE] Vulkan pipeline cache unavailable\n";
+                    }
+                } else {
+                    std::clog << "[CORE] Vulkan pipeline cache unsupported by backend\n";
+                }
+            }
         } else {
             // llama.cpp defaults to using every available accelerator and to
             // offloading all layers. Supply an explicitly empty device list as
@@ -323,8 +342,8 @@ public:
             if (token == LLAMA_TOKEN_NULL) token = llama_vocab_eos(_vocab);
             if (token == LLAMA_TOKEN_NULL) token = 0;
             prepare_vulkan_pipelines(prepared.get(), token);
-            // Optional extension supplied by the Windows ggml overlay. Save
-            // after preparation, not on a keystroke or only during shutdown.
+            // Save after preparation, not on a keystroke or only during
+            // shutdown. With no configured directory this is a no-op.
             const auto registry = ggml_backend_dev_backend_reg(offload_device.device);
             using SavePipelineCache = void (*)(ggml_backend_dev_t);
             const auto save_cache = reinterpret_cast<SavePipelineCache>(
