@@ -4,28 +4,26 @@ Llavon IME 的跨平台靜態 C++ 推論函式庫。本專案負責模型載入�
 （candidate masking）、llama.cpp 推論與每位客戶端的推論 session；不含服務
 IPC、處理程序啟動或作業系統特定的路徑探索。
 
-`EncodingTables` exposes the inference tokenizer and Bopomofo candidate table
-to offline dataset builders without loading a model.
+`EncodingTables` 可在不載入模型的情況下，將推論用分詞器與注音候選字表
+提供給離線資料集建置工具使用。
 
-## Build
+## 建置
 
-Vulkan pipelines are prepared once while the model loads. The preparation
-covers small inference batches and populated KV caches, then clears the
-synthetic state and gives the prepared context to the first session. This
-avoids deferring expensive pipeline creation to the first few keystrokes.
-It increases model-load time and does not run periodically while idle.
-When a host supplies `CoreConfig::vulkan_pipeline_cache_dir`, the core
-configures the Vulkan backend before model loading and saves its pipeline cache
-after preparation. An empty path disables persistent caching. The core remains
-compatible with backends without this optional registry-function extension.
+模型載入時會一次預備 Vulkan 管線。預備範圍包含小型推論批次與已有內容的
+KV 快取；完成後會清除合成狀態，並將預備好的推論內容交給第一個工作階段使用。
+如此可避免把耗時的管線建立延後到最初幾次按鍵輸入。這會增加模型載入
+時間，但不會在閒置期間定期執行。
 
-Set `IME_CORE_BUILD_TOOLS=ON` to build `ime-core-latency-check`. Run it with
-`MODEL_PATH TABLES_DIRECTORY VULKAN_DEVICE_ID` (for example, `Vulkan0`). Pass
-`--cache-dir DIRECTORY` to opt in to persistent pipeline caching. The tool
-checks two fresh sessions, varying context lengths, 250 ms spacing, and
-2.3-second idle resumes. Every request is reported, including the first;
-candidate output is included for before/after correctness comparison.
-Append `--load-only` for a fresh-process model-load/cache diagnostic.
+當主程式提供 `CoreConfig::vulkan_pipeline_cache_dir` 時，核心會在載入模型前設定
+Vulkan 後端，並於預備完成後儲存管線快取。路徑為空時會停用持久化快取。
+若後端未提供這個選用的函式查詢擴充，核心仍可正常運作。
+
+設定 `IME_CORE_BUILD_TOOLS=ON` 可建置 `ime-core-latency-check`。執行時依序傳入
+`MODEL_PATH TABLES_DIRECTORY VULKAN_DEVICE_ID`，例如 `Vulkan0`。另外傳入
+`--cache-dir DIRECTORY` 才會啟用持久化管線快取。此工具會測試兩個全新
+工作階段、不同的上下文長度、250 毫秒間隔，以及閒置 2.3 秒後恢復推論；包含
+第一次在內的每項請求都會輸出結果，並列出候選字，供修改前後比對正確性。
+加上 `--load-only` 可在全新處理程序中只診斷模型載入與快取。
 
 由呼叫端傳入 vcpkg 工具鏈：
 
