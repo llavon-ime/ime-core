@@ -29,6 +29,7 @@ public:
         paths_ = std::make_shared<internal::CorePaths>(
             config_.model_path,
             config_.tables_dir,
+            config_.vulkan_pipeline_cache_dir,
             config_.context_length,
             config_.threads,
             config_.gpu_layers,

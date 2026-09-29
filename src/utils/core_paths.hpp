@@ -12,11 +12,14 @@ namespace llavon::ime::core::internal {
 class CorePaths {
 public:
     CorePaths(std::filesystem::path model_path, std::filesystem::path tables_dir,
+              std::filesystem::path vulkan_pipeline_cache_dir = {},
               std::uint32_t context_length = 0, std::uint32_t threads = 8,
               int gpu_layers = -2,
               InferenceDeviceSelection inference_device = {})
         : model_path_(normalize(std::move(model_path))),
           tables_dir_(normalize(std::move(tables_dir))),
+          vulkan_pipeline_cache_dir_(normalize_optional(
+              std::move(vulkan_pipeline_cache_dir))),
           context_length_(context_length),
           threads_(threads),
           gpu_layers_(gpu_layers),
@@ -41,6 +44,9 @@ public:
 
     const std::filesystem::path& model_path() const noexcept { return model_path_; }
     const std::filesystem::path& tables_dir() const noexcept { return tables_dir_; }
+    const std::filesystem::path& vulkan_pipeline_cache_dir() const noexcept {
+        return vulkan_pipeline_cache_dir_;
+    }
 
     std::uint32_t context_length() const noexcept { return context_length_; }
     std::uint32_t threads() const noexcept { return threads_; }
@@ -57,6 +63,10 @@ private:
         return path.lexically_normal();
     }
 
+    static std::filesystem::path normalize_optional(std::filesystem::path path) {
+        return path.empty() ? path : normalize(std::move(path));
+    }
+
     static void require_file(const std::filesystem::path& path) {
         if (!std::filesystem::is_regular_file(path)) {
             throw std::runtime_error("required table file not found: " + path.string());
@@ -65,6 +75,7 @@ private:
 
     std::filesystem::path model_path_;
     std::filesystem::path tables_dir_;
+    std::filesystem::path vulkan_pipeline_cache_dir_;
     std::uint32_t context_length_ = 0;
     std::uint32_t threads_ = 8;
     int gpu_layers_ = -2;

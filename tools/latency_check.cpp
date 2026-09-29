@@ -40,9 +40,9 @@ private:
 };
 
 int main(int argc, char** argv) {
-    const bool load_only = argc == 5 && std::string_view(argv[4]) == "--load-only";
-    if (argc != 4 && !load_only) {
-        std::cerr << "usage: ime-core-latency-check MODEL TABLES VULKAN_DEVICE_ID [--load-only]\n";
+    if (argc < 4) {
+        std::cerr << "usage: ime-core-latency-check MODEL TABLES VULKAN_DEVICE_ID "
+                     "[--cache-dir DIRECTORY] [--load-only]\n";
         return 2;
     }
     try {
@@ -52,6 +52,18 @@ int main(int argc, char** argv) {
         config.model_path = argv[1];
         config.tables_dir = argv[2];
         config.inference_device = {core::InferenceBackend::vulkan, argv[3]};
+        bool load_only = false;
+        for (int index = 4; index < argc; ++index) {
+            const std::string_view argument(argv[index]);
+            if (argument == "--load-only") {
+                load_only = true;
+            } else if (argument == "--cache-dir" && index + 1 < argc) {
+                config.vulkan_pipeline_cache_dir = argv[++index];
+            } else {
+                std::cerr << "invalid argument: " << argument << '\n';
+                return 2;
+            }
+        }
         config.logger = logger;
         const auto load_begin = Clock::now();
         core::Core model(std::move(config));
