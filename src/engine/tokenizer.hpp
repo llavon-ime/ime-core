@@ -106,7 +106,7 @@ public:
         for (size_t i = 0; i < context.size(); i++) {
             std::string s;
             utf8::append(context[i], s);
-            if (context[i] == U' ') {
+            if (context[i] == U' ' || context[i] == U'\n') {
                 context_tokens.push_back(special_table.at("<SP>"));
             } else if (char_table.contains(s)) {
                 context_tokens.push_back(char_table.at(s));
