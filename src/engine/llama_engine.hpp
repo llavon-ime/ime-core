@@ -26,6 +26,7 @@
 
 #include "../bopomofo/bopomofo.hpp"
 #include "engine.hpp"
+#include "vulkan_pipeline_warmup.hpp"
 #include "../utils/core_paths.hpp"
 
 #ifndef IME_CORE_TRACE_PREDICT
@@ -246,6 +247,8 @@ private:
     llama_model_ptr _model;
     const llama_vocab* _vocab = nullptr;
     InferenceRuntimeInfo runtime_info_;
+    std::mutex prepared_context_mutex_;
+    llama_context_ptr prepared_context_;
 
 public:
     explicit ModelManager(std::shared_ptr<const CorePaths> paths) : paths_(std::move(paths)) {
@@ -313,6 +316,25 @@ public:
                   << inference_backend_name(runtime_info_.device.backend)
                   << " name=" << runtime_info_.device.name
                   << " id=" << runtime_info_.device.device_id << '\n';
+        if (runtime_info_.gpu_offload && runtime_info_.device.backend == InferenceBackend::vulkan) {
+            const auto start = std::chrono::steady_clock::now();
+            llama_context_ptr prepared{new_context()};
+            auto token = llama_vocab_bos(_vocab);
+            if (token == LLAMA_TOKEN_NULL) token = llama_vocab_eos(_vocab);
+            if (token == LLAMA_TOKEN_NULL) token = 0;
+            prepare_vulkan_pipelines(prepared.get(), token);
+            // Optional extension supplied by the Windows ggml overlay. Save
+            // after preparation, not on a keystroke or only during shutdown.
+            const auto registry = ggml_backend_dev_backend_reg(offload_device.device);
+            using SavePipelineCache = void (*)(ggml_backend_dev_t);
+            const auto save_cache = reinterpret_cast<SavePipelineCache>(
+                ggml_backend_reg_get_proc_address(registry, "ggml_backend_vk_save_pipeline_cache"));
+            if (save_cache) save_cache(offload_device.device);
+            prepared_context_ = std::move(prepared);
+            std::clog << std::format("[CORE] Vulkan pipelines prepared load_ms={:.3f}\n",
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count());
+        }
         std::clog << "[CORE] model loaded\n";
     }
     llama_model* model() {
@@ -322,6 +344,10 @@ public:
         return _vocab;
     }
     llama_context* new_context(uint32_t n_ctx = 0, uint32_t n_batch = 0) {
+        if (n_ctx == 0 && n_batch == 0) {
+            const std::lock_guard lock(prepared_context_mutex_);
+            if (prepared_context_) return prepared_context_.release();
+        }
         std::clog << "[CORE] creating context\n";
         auto params = llama_context_default_params();
         if (n_ctx != 0) {

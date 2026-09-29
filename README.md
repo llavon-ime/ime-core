@@ -9,6 +9,23 @@ to offline dataset builders without loading a model.
 
 ## Build
 
+Vulkan pipelines are prepared once while the model loads. The preparation
+covers small inference batches and populated KV caches, then clears the
+synthetic state and gives the prepared context to the first session. This
+avoids deferring expensive pipeline creation to the first few keystrokes.
+It increases model-load time and does not run periodically while idle.
+When the Windows host supplies the patched ggml backend, the core saves its
+pipeline cache after preparation. That backend loads compatible compiled
+data on the next process start; the core remains compatible with unpatched
+ggml builds through an optional registry-function lookup.
+
+Set `IME_CORE_BUILD_TOOLS=ON` to build `ime-core-latency-check`. Run it with
+`MODEL_PATH TABLES_DIRECTORY VULKAN_DEVICE_ID` (for example, `Vulkan0`). It
+checks two fresh sessions, varying context lengths, 250 ms spacing, and
+2.3-second idle resumes. Every request is reported, including the first;
+candidate output is included for before/after correctness comparison.
+Append `--load-only` for a fresh-process model-load/cache diagnostic.
+
 由呼叫端傳入 vcpkg 工具鏈：
 
 ```powershell

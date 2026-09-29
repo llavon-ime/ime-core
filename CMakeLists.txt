@@ -6,6 +6,7 @@ include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
 option(IME_CORE_BUILD_TESTS "Build ime-core tests" OFF)
+option(IME_CORE_BUILD_TOOLS "Build manual inference diagnostics (requires a model)" OFF)
 
 find_package(llama CONFIG REQUIRED)
 find_package(reflectcpp CONFIG REQUIRED)
@@ -29,6 +30,7 @@ add_library(ime-core STATIC
     src/bopomofo/bopomofo.hpp
     src/engine/engine.hpp
     src/engine/llama_engine.hpp
+    src/engine/vulkan_pipeline_warmup.hpp
     src/engine/tokenizer.hpp
     src/utils/core_paths.hpp
 )
@@ -100,4 +102,13 @@ if(IME_CORE_BUILD_TESTS)
     target_compile_features(ime-core-api-tests PRIVATE cxx_std_23)
     target_link_libraries(ime-core-api-tests PRIVATE ime-core::ime-core)
     add_test(NAME ime-core-api-tests COMMAND ime-core-api-tests)
+endif()
+
+if(IME_CORE_BUILD_TOOLS)
+    add_executable(ime-core-latency-check tools/latency_check.cpp)
+    target_compile_features(ime-core-latency-check PRIVATE cxx_std_23)
+    target_link_libraries(ime-core-latency-check PRIVATE ime-core::ime-core)
+    if(MSVC)
+        target_compile_options(ime-core-latency-check PRIVATE /W4 /WX /utf-8)
+    endif()
 endif()
