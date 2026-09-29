@@ -1,0 +1,7 @@
+{
+  "name": "windows-ml",
+  "version": "2.3.42",
+  "description": "Microsoft Windows ML native runtime and execution provider catalog",
+  "homepage": "https://learn.microsoft.com/windows/ai/new-windows-ml/",
+  "supports": "windows & x64"
+}

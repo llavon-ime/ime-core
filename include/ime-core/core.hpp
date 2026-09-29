@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,12 +18,14 @@ enum class InferenceBackend : std::uint8_t {
     cuda,
     vulkan,
     metal,
+    ryzen_ai,
 };
 
 enum class InferenceDeviceType : std::uint8_t {
     cpu,
     gpu,
     integrated_gpu,
+    npu,
 };
 
 struct InferenceDeviceSelection {
@@ -44,6 +47,27 @@ struct InferenceRuntimeInfo {
     InferenceDeviceInfo device;
     bool gpu_offload = false;
     bool fell_back_to_cpu = false;
+    bool npu_offload = false;
+};
+
+// One decoder context per IME session. Implementations retain their own KV
+// cache; only tokens and final logits cross this interface.
+class InferenceContext {
+public:
+    virtual ~InferenceContext() = default;
+    virtual void decode(std::span<const std::int32_t> tokens, std::uint32_t position) = 0;
+    virtual void truncate(std::uint32_t length) = 0;
+    virtual std::span<const float> logits() const = 0;
+};
+
+// The model owns its accelerator and prepared weights. Preparation must finish
+// before the replacement core is made visible to IME clients.
+class InferenceAccelerator {
+public:
+    virtual ~InferenceAccelerator() = default;
+    virtual void prepare(const std::filesystem::path& model, std::uint32_t context_length) = 0;
+    virtual std::unique_ptr<InferenceContext> create_context() = 0;
+    virtual InferenceDeviceInfo device_info() const = 0;
 };
 
 struct CoreConfig {
@@ -54,6 +78,7 @@ struct CoreConfig {
     int gpu_layers = -2;
     InferenceDeviceSelection inference_device;
     std::shared_ptr<Logger> logger;
+    std::shared_ptr<InferenceAccelerator> accelerator;
 };
 
 // Enumerates devices from the inference backends that are available in the

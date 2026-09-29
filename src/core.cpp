@@ -33,7 +33,8 @@ public:
             config_.threads,
             config_.gpu_layers,
             config_.inference_device);
-        model_manager_ = std::make_shared<internal::ModelManager>(paths_);
+        model_manager_ = std::make_shared<internal::ModelManager>(paths_, config_.accelerator);
+        model_manager_->verify_accelerator();
         tokenizer_ = std::make_shared<internal::Tokenizer>(*paths_);
         hanzi_map_ = std::make_shared<internal::HanziMapEngine>(*paths_);
         runtime_info_ = model_manager_->runtime_info();

@@ -1,0 +1,11 @@
+{
+  "name": "onnxruntime-genai-winml",
+  "version": "0.15.2",
+  "description": "ONNX Runtime GenAI native runtime built for Windows ML",
+  "homepage": "https://github.com/microsoft/onnxruntime-genai",
+  "license": "MIT",
+  "supports": "windows & x64",
+  "dependencies": [
+    "windows-ml"
+  ]
+}

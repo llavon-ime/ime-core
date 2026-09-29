@@ -118,10 +118,12 @@ private:
         if (registry_name == "mtl" || registry_name.find("metal") != std::string::npos) {
             return InferenceBackend::metal;
         }
+        if (registry_name == "ryzenai-npu") return InferenceBackend::ryzen_ai;
         return std::nullopt;
     }
 
     static InferenceDeviceType public_device_type(enum ggml_backend_dev_type type) {
+        if (type == GGML_BACKEND_DEVICE_TYPE_ACCEL) return InferenceDeviceType::npu;
         if (type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
             return InferenceDeviceType::integrated_gpu;
         }
@@ -190,6 +192,7 @@ private:
         if (backend == InferenceBackend::cuda) return "CUDA";
         if (backend == InferenceBackend::vulkan) return "Vulkan";
         if (backend == InferenceBackend::metal) return "Metal";
+        if (backend == InferenceBackend::ryzen_ai) return "AMD NPU";
         return "automatic";
     }
 
@@ -243,12 +246,17 @@ private:
     }
 
     std::shared_ptr<const CorePaths> paths_;
+    std::shared_ptr<InferenceAccelerator> accelerator_;
     llama_model_ptr _model;
     const llama_vocab* _vocab = nullptr;
     InferenceRuntimeInfo runtime_info_;
+    std::mutex accelerator_warmup_mutex_;
+    std::unique_ptr<InferenceContext> accelerator_warmup_;
 
 public:
-    explicit ModelManager(std::shared_ptr<const CorePaths> paths) : paths_(std::move(paths)) {
+    explicit ModelManager(std::shared_ptr<const CorePaths> paths,
+                          std::shared_ptr<InferenceAccelerator> accelerator = {})
+        : paths_(std::move(paths)), accelerator_(std::move(accelerator)) {
         if (!paths_) {
             throw std::invalid_argument("llama model paths are required");
         }
@@ -257,6 +265,27 @@ public:
         auto model_params = llama_model_default_params();
         std::array<ggml_backend_dev_t, 2> offload_devices{};
         const auto& requested_device = paths_->inference_device();
+        const bool wants_npu = requested_device.backend == InferenceBackend::ryzen_ai;
+        if (wants_npu && !accelerator_) {
+            throw std::runtime_error("AMD NPU runtime is not configured; select an available device or configure Ryzen AI");
+        }
+        if (wants_npu) {
+            const auto device = accelerator_->device_info();
+            if (!requested_device.device_id.empty() && requested_device.device_id != device.device_id) {
+                throw std::runtime_error("Requested AMD NPU device is unavailable");
+            }
+            // llama provides vocabulary metadata only on this path. All
+            // decoder operations and KV state belong to the NPU context.
+            model_params.vocab_only = true;
+            model_params.n_gpu_layers = 0;
+            model_params.devices = offload_devices.data();
+            _model.reset(llama_model_load_from_file(path.c_str(), model_params));
+            if (!_model) throw std::runtime_error("Failed to load model vocabulary: " + path);
+            _vocab = llama_model_get_vocab(_model.get());
+            accelerator_->prepare(paths_->model_path(), paths_->context_length());
+            runtime_info_ = {.device = device, .npu_offload = true};
+            return;
+        }
         LlamaOffloadDevice offload_device =
             requested_device.backend == InferenceBackend::cpu
                 ? LlamaOffloadDevice{}
@@ -308,12 +337,31 @@ public:
             .device = public_device_info(active_device),
             .gpu_offload = use_gpu_offload,
             .fell_back_to_cpu = wants_gpu && !use_gpu_offload,
+            .npu_offload = false,
         };
         std::clog << "[CORE] active inference device backend="
                   << inference_backend_name(runtime_info_.device.backend)
                   << " name=" << runtime_info_.device.name
                   << " id=" << runtime_info_.device.device_id << '\n';
         std::clog << "[CORE] model loaded\n";
+    }
+    void verify_accelerator() {
+        if (!runtime_info_.npu_offload) return;
+        std::lock_guard guard(accelerator_warmup_mutex_);
+        if (!accelerator_warmup_) accelerator_warmup_ = accelerator_->create_context();
+        auto& context = accelerator_warmup_;
+        context->truncate(0);
+        llama_token token = llama_vocab_bos(_vocab);
+        if (token < 0) token = 0;
+        context->decode(std::span(&token, 1), 0);
+        const auto logits = context->logits();
+        if (logits.size() != static_cast<std::size_t>(llama_vocab_n_tokens(_vocab)) ||
+            !std::ranges::all_of(logits, [](float value) { return std::isfinite(value); })) {
+            throw std::runtime_error("AMD NPU preparation returned invalid decoder logits");
+        }
+    }
+    std::unique_ptr<InferenceContext> new_accelerated_context() {
+        return runtime_info_.npu_offload ? accelerator_->create_context() : nullptr;
     }
     llama_model* model() {
         return _model.get();
@@ -349,8 +397,9 @@ class LlamaEngine : public IEngine {
     std::shared_ptr<Logger> logger_;
     llama_context_ptr llama_ctx;
     llama_context_ptr warmup_ctx;
+    std::unique_ptr<InferenceContext> accelerated_ctx;
     std::vector<llama_token> prev_tokens;
-    llama_memory_t mem;
+    llama_memory_t mem = nullptr;
     llama_pos next_pos = 0;
     std::chrono::steady_clock::time_point last_backend_touch = std::chrono::steady_clock::time_point::min();
 
@@ -385,9 +434,12 @@ public:
         if (!model_manager_ || !tokenizer_ || !hanzi_map_ || !logger_) {
             throw std::invalid_argument("llama engine dependencies are required");
         }
-        llama_ctx.reset(model_manager_->new_context());
-        mem = llama_get_memory(llama_ctx.get());
-        llama_memory_clear(mem, true);
+        accelerated_ctx = model_manager_->new_accelerated_context();
+        if (!accelerated_ctx) {
+            llama_ctx.reset(model_manager_->new_context());
+            mem = llama_get_memory(llama_ctx.get());
+            llama_memory_clear(mem, true);
+        }
         logger_->log(LogInformation::general, "[CORE] engine ready");
     }
 
@@ -399,6 +451,15 @@ public:
         }
 
         const auto warmup_start = std::chrono::steady_clock::now();
+        if (accelerated_ctx) {
+            // One reusable warmup context per model avoids allocating a full
+            // NPU KV buffer on each focus event and leaves this session intact.
+            model_manager_->verify_accelerator();
+            mark_backend_touch();
+            logger_->log(LogInformation::general,
+                std::format("[TIME] ready_warmup_ms={:.3f}", milliseconds(elapsed_us(warmup_start))));
+            return;
+        }
         if (!warmup_ctx) {
             warmup_ctx.reset(model_manager_->new_context(8, 1));
         }
@@ -722,23 +783,25 @@ private:
         if (tokens.empty()) return;
 
         const auto batch_start = std::chrono::steady_clock::now();
-        llama_batch batch = make_token_batch(tokens.data(), tokens.size(), next_pos, true);
+        llama_batch batch = accelerated_ctx ? llama_batch{} : make_token_batch(tokens.data(), tokens.size(), next_pos, true);
         timing.step_batch_us += elapsed_us(batch_start);
 
         const auto decode_start = std::chrono::steady_clock::now();
-        int rc = llama_decode(llama_ctx.get(), batch);
+        int rc = 0;
+        if (accelerated_ctx) accelerated_ctx->decode(tokens, static_cast<std::uint32_t>(next_pos));
+        else rc = llama_decode(llama_ctx.get(), batch);
         const long long decode_us = elapsed_us(decode_start);
         if (rc == 0) mark_backend_touch();
         timing.step_decode_us += decode_us;
 
         const auto sync_start = std::chrono::steady_clock::now();
-        llama_synchronize(llama_ctx.get());
+        if (!accelerated_ctx) llama_synchronize(llama_ctx.get());
         const long long sync_us = elapsed_us(sync_start);
         timing.step_sync_us += sync_us;
         log_slow_decode("step", next_pos, tokens.size(), tokens.back(), decode_us, sync_us);
 
         const auto free_start = std::chrono::steady_clock::now();
-        llama_batch_free(batch);
+        if (!accelerated_ctx) llama_batch_free(batch);
         timing.step_batch_us += elapsed_us(free_start);
         timing.decode_calls++;
         timing.step_tokens += tokens.size();
@@ -772,7 +835,9 @@ private:
 #endif
 
         if (common < prev_tokens.size()) {
-            bool ok = llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1);
+            bool ok = true;
+            if (accelerated_ctx) accelerated_ctx->truncate(static_cast<std::uint32_t>(common));
+            else ok = llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1);
 #if IME_CORE_TRACE_PREDICT
             logger_->log(LogInformation::general, [common, ok] {
                 return std::format("[CORE] seq_rm from={} result={}", common,
@@ -796,23 +861,25 @@ private:
             }
 
             const auto batch_start = std::chrono::steady_clock::now();
-            llama_batch batch = make_token_batch(prompt_tokens.data(), prompt_tokens.size(), next_pos, true);
+            llama_batch batch = accelerated_ctx ? llama_batch{} : make_token_batch(prompt_tokens.data(), prompt_tokens.size(), next_pos, true);
             timing.cache_batch_us += elapsed_us(batch_start);
 
             const auto decode_start = std::chrono::steady_clock::now();
-            int rc = llama_decode(llama_ctx.get(), batch);
+            int rc = 0;
+            if (accelerated_ctx) accelerated_ctx->decode(prompt_tokens, static_cast<std::uint32_t>(next_pos));
+            else rc = llama_decode(llama_ctx.get(), batch);
             const long long decode_us = elapsed_us(decode_start);
             if (rc == 0) mark_backend_touch();
             timing.cache_decode_us += decode_us;
 
             const auto sync_start = std::chrono::steady_clock::now();
-            llama_synchronize(llama_ctx.get());
+            if (!accelerated_ctx) llama_synchronize(llama_ctx.get());
             const long long sync_us = elapsed_us(sync_start);
             timing.cache_sync_us += sync_us;
             log_slow_decode("cache", next_pos, prompt_tokens.size(), prompt_tokens.back(), decode_us, sync_us);
 
             const auto free_start = std::chrono::steady_clock::now();
-            llama_batch_free(batch);
+            if (!accelerated_ctx) llama_batch_free(batch);
             timing.cache_batch_us += elapsed_us(free_start);
             timing.cache_tokens += new_count;
             if (rc != 0) throw std::runtime_error("llama_decode failed in ensure_cache");
@@ -824,7 +891,7 @@ private:
 
     std::vector<TokenProb> masked_predict(const std::vector<llama_token>& candidate, PredictTiming& timing) {
         const auto mask_start = std::chrono::steady_clock::now();
-        float* logits = llama_get_logits_ith(llama_ctx.get(), -1);
+        const float* logits = accelerated_ctx ? accelerated_ctx->logits().data() : llama_get_logits_ith(llama_ctx.get(), -1);
         if (!logits) throw std::runtime_error("llama_get_logits_ith error");
 
         std::vector<float> cand_logits(candidate.size());

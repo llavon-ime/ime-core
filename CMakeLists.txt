@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
 
+option(IME_CORE_ENABLE_RYZENAI "Build the optional AMD Ryzen AI inference backend" OFF)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND IME_CORE_ENABLE_RYZENAI)
+    list(APPEND VCPKG_MANIFEST_FEATURES "ryzen-ai")
+    list(REMOVE_DUPLICATES VCPKG_MANIFEST_FEATURES)
+endif()
+
 project(ime_core VERSION 0.1.0 LANGUAGES CXX)
 
 include(CMakePackageConfigHelpers)
@@ -26,6 +32,8 @@ add_library(ime-core STATIC
     include/ime-core/core.hpp
     include/ime-core/encoding_tables.hpp
     include/ime-core/logger.hpp
+    include/ime-core/ryzen_ai.hpp
+    src/backends/ryzen_ai/ryzen_ai.cpp
     src/bopomofo/bopomofo.hpp
     src/engine/engine.hpp
     src/engine/llama_engine.hpp
@@ -55,6 +63,10 @@ target_link_libraries(ime-core
         reflectcpp::reflectcpp
         ${IME_CORE_UTF8_TARGET}
 )
+
+if(IME_CORE_ENABLE_RYZENAI)
+    include(cmake/ryzen-ai.cmake)
+endif()
 
 if(MSVC)
     target_compile_options(ime-core PRIVATE /W4 /WX /utf-8)
@@ -100,4 +112,15 @@ if(IME_CORE_BUILD_TESTS)
     target_compile_features(ime-core-api-tests PRIVATE cxx_std_23)
     target_link_libraries(ime-core-api-tests PRIVATE ime-core::ime-core)
     add_test(NAME ime-core-api-tests COMMAND ime-core-api-tests)
+
+    if(IME_CORE_ENABLE_RYZENAI)
+        add_executable(ime-core-provider-metadata-tests tests/ryzen_ai/provider_metadata_tests.cpp)
+        target_compile_features(ime-core-provider-metadata-tests PRIVATE cxx_std_23)
+        target_compile_options(ime-core-provider-metadata-tests PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(ime-core-provider-metadata-tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_include_directories(ime-core-provider-metadata-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(ime-core-provider-metadata-tests PRIVATE WindowsML::Api)
+        add_test(NAME ime-core-provider-metadata-tests COMMAND ime-core-provider-metadata-tests)
+
+    endif()
 endif()

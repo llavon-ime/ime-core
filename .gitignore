@@ -2,3 +2,18 @@ build*/
 dist*/
 vcpkg_installed/
 CMakeUserPresets.json
+.onnx-export-cache/
+__pycache__/
+*.py[cod]
+
+# Local IDE and CMake state
+.vs/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# NPU validation output
+npu-cache/
+npu-report.json

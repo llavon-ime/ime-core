@@ -28,6 +28,14 @@ cmake --install build/windows --config Release
 `enumerate_inference_devices()` 會回報已載入的 ggml 後端所暴露的裝置，且不需
 載入模型。核心不會尋找或解析應用程式的設定檔。
 
+## AMD Ryzen AI（選用）
+
+`IME_CORE_ENABLE_RYZENAI=ON` 啟用 Windows ML / VitisAI 後端。呼叫端透過
+`ime-core/ryzen_ai.hpp` 傳入 ONNX Runtime GenAI 模型目錄與 EPContext 快取目錄。
+Windows ML 負責取得已簽署的執行提供者；核心不依賴 Ryzen AI SDK 或 XRT。
+預設關閉，不影響一般跨平台建置。詳細限制、公開 API 與獨立建置方式見
+[Ryzen AI 後端](docs/ryzen-ai.md)。
+
 ## 日誌
 
 `CoreConfig::logger` 可接受平台無關的 `Logger` 介面的選用實作。
