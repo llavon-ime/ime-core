@@ -72,16 +72,7 @@ install(TARGETS ime-core
 )
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY table/ DESTINATION "${CMAKE_INSTALL_DATADIR}/ime-core/tables")
-install(
-    FILES
-        LICENSE
-        THIRD_PARTY_NOTICES.md
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/ime-core"
-)
-install(
-    FILES licenses/McBopomofo-MIT.txt
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/ime-core/licenses"
-)
+install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/ime-core")
 
 configure_package_config_file(
     cmake/ime-core-config.cmake.in

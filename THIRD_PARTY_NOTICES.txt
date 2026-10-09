@@ -1,3 +1,18 @@
+Third-Party Notices
+===================
+
+McBopomofo (OpenVanilla)
+-----------------------
+
+The character-to-Bopomofo mapping data in table/bopomofo_char.json is
+derived from McBopomofo: https://github.com/openvanilla/McBopomofo
+
+The data was converted to JSON, retaining the Bopomofo readings and candidate
+characters. No explicit frequency or weight fields are included.
+In the Windows installation, this file is located at tables/bopomofo_char.json.
+
+The following upstream copyright and MIT License notice applies to this data.
+
 MIT License
 
 Copyright (c) 2011-2026 Mengjuei Hsieh et al.
