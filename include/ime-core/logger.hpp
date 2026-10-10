@@ -10,6 +10,7 @@ namespace llavon::ime::core {
 enum class LogInformation : std::uint8_t {
     general = 0,
     context = 1,
+    debug = 2,
 };
 
 class Logger {
