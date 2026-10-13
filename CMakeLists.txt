@@ -102,6 +102,24 @@ if(IME_CORE_BUILD_TESTS)
     target_compile_features(ime-core-api-tests PRIVATE cxx_std_23)
     target_link_libraries(ime-core-api-tests PRIVATE ime-core::ime-core)
     add_test(NAME ime-core-api-tests COMMAND ime-core-api-tests)
+
+    add_executable(ime-core-tokenizer-tests tests/tokenizer_tests.cpp)
+    target_compile_features(ime-core-tokenizer-tests PRIVATE cxx_std_23)
+    set_target_properties(ime-core-tokenizer-tests PROPERTIES CXX_EXTENSIONS NO)
+    target_include_directories(ime-core-tokenizer-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(ime-core-tokenizer-tests PRIVATE
+        IME_CORE_TEST_TABLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/table")
+    target_link_libraries(ime-core-tokenizer-tests PRIVATE
+        ime-core::ime-core reflectcpp::reflectcpp ${IME_CORE_UTF8_TARGET})
+    if(MSVC)
+        target_compile_options(ime-core-tokenizer-tests PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(ime-core-tokenizer-tests PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+            -Wformat=2 -Wundef -Wcast-align -Wswitch-enum
+            -Wnon-virtual-dtor -Woverloaded-virtual)
+    endif()
+    add_test(NAME ime-core-tokenizer-tests COMMAND ime-core-tokenizer-tests)
 endif()
 
 if(IME_CORE_BUILD_TOOLS)

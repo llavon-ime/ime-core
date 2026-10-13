@@ -144,6 +144,9 @@ public:
                 std::string s8 = "<" + utf8::utf16to8(entry.bpmf) + ">";
                 if (s8 == "<ㄋㄜ >") s8 = "<ㄋㄜ˙>";
                 if (s8 == "<ㄌㄜ >") s8 = "<ㄌㄜ˙>";
+                // Alias only the model token; retain the original reading for
+                // candidate lookup so first-tone ㄟ still produces ㄟ, not 欸.
+                if (s8 == "<ㄟ >") s8 = "<ㄟˋ>";
                 if (!bpmf_table.contains(s8)) {
                     throw std::logic_error("invalid bpmf: " + s8);
                 }
