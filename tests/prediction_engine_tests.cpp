@@ -1,0 +1,137 @@
+#include "engine/core_state.hpp"
+
+#include <cstdlib>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <span>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace {
+using namespace llavon::ime::core;
+using namespace llavon::ime::core::internal;
+
+class QuietLogger final : public Logger {
+public:
+    using Logger::log;
+    void log(std::string) noexcept override {}
+    void log(MessageFactory) noexcept override {}
+};
+
+struct FakeModel {
+    struct Decode { std::size_t position; std::vector<int> tokens; };
+    std::vector<Decode> calls;
+    std::vector<std::size_t> rewinds;
+    int clears = 0;
+    int warmups = 0;
+    bool fail_decode = false;
+    bool reject_rewind = false;
+    InferenceRuntimeInfo runtime;
+    explicit FakeModel(std::shared_ptr<const CorePaths>) {}
+    static std::vector<InferenceDeviceInfo> enumerate_devices() { return {}; }
+    const InferenceRuntimeInfo& runtime_info() const { return runtime; }
+    std::size_t vocabulary_size() const { return 65536; }
+};
+
+class FakeBackend {
+public:
+    using Model = FakeModel;
+    explicit FakeBackend(std::shared_ptr<Model> model) : model_(std::move(model)) {
+        values_.resize(model_->vocabulary_size());
+        const Tokenizer tokenizer(IME_CORE_TEST_TABLES_DIR);
+        values_.at(static_cast<std::size_t>(tokenizer.map_char(U'你'))) = 10;
+        values_.at(static_cast<std::size_t>(tokenizer.map_char(U'好'))) = 9;
+    }
+    void ready() { ++model_->warmups; }
+    void clear() { ++model_->clears; offset_ = 0; }
+    bool rewind(std::size_t position) {
+        model_->rewinds.push_back(position);
+        if (model_->reject_rewind) return false;
+        if (position > offset_) throw std::logic_error("rewind exceeds cache");
+        offset_ = position;
+        return true;
+    }
+    void decode(std::span<const int> tokens, std::size_t position) {
+        if (position != offset_) throw std::logic_error("incorrect cache position");
+        model_->calls.push_back({position, {tokens.begin(), tokens.end()}});
+        offset_ += tokens.size();
+        if (std::exchange(model_->fail_decode, false)) throw std::runtime_error("partial decode failure");
+    }
+    std::span<const float> logits() const { return values_; }
+private:
+    std::shared_ptr<Model> model_;
+    std::vector<float> values_;
+    std::size_t offset_ = 0;
+};
+
+static_assert(BackendPolicy<FakeBackend>);
+static_assert(!BackendPolicy<int>);
+static_assert(!std::is_polymorphic_v<FakeBackend>);
+static_assert(!std::is_polymorphic_v<PredictionEngine<FakeBackend>>);
+
+void require(bool condition, const char* message) {
+    if (!condition) throw std::runtime_error(message);
+}
+
+void test() {
+    const auto tokenizer = std::make_shared<Tokenizer>(IME_CORE_TEST_TABLES_DIR);
+    const auto family = std::make_shared<HanziMapEngine>(IME_CORE_TEST_TABLES_DIR);
+    const auto logger = std::make_shared<QuietLogger>();
+    const auto model = std::make_shared<FakeModel>(nullptr);
+    PredictionEngine<FakeBackend> engine(model, tokenizer, family, logger);
+    engine.ready(); engine.ready();
+    require(model->warmups == 1 && model->calls.empty(), "warmup touched prediction state");
+
+    const std::vector<llavon::ime::core::internal::PaddingEntry> pair{{false, 0, u"ㄋㄧˇ"}, {false, 0, u"ㄏㄠˇ"}};
+    const auto prompt = tokenizer->tokenize(u"", pair);
+    auto results = engine.predict(u"", pair);
+    require(results.size() == 2 && results[0].candidates.front().first == U'你' &&
+        results[1].candidates.front().first == U'好', "masked ranking changed");
+    require(model->calls.size() == 2 && model->calls[0].tokens == prompt &&
+        model->calls[1].tokens == std::vector<int>{tokenizer->map_char(U'你')}, "incorrect decode batching");
+    require(model->calls[1].position == prompt.size(), "incorrect guess position");
+
+    (void)engine.predict(u"", pair);
+    require(model->rewinds.back() == prompt.size() - 1 &&
+        model->calls[2].tokens == std::vector<int>{prompt.back()}, "shortened cache did not refresh SEP logits");
+    const std::vector<llavon::ime::core::internal::PaddingEntry> singleton{{false, 0, u"ㄋㄧˇ"}};
+    (void)engine.predict(u"", singleton);
+    const auto unchanged = model->calls.size();
+    (void)engine.predict(u"", singleton);
+    require(model->calls.size() == unchanged, "unchanged prompt was unnecessarily decoded");
+
+    (void)engine.predict(u"新", singleton);
+    require(model->calls.back().position == 1, "fresh context reused a stale suffix");
+    model->reject_rewind = true;
+    (void)engine.predict(u"", singleton);
+    require(model->clears > 0 && model->calls.back().position == 0, "rewind rejection did not rebuild cache");
+    model->reject_rewind = false;
+
+    model->fail_decode = true;
+    bool failed = false;
+    try { (void)engine.predict(u"失敗", singleton); } catch (const std::runtime_error&) { failed = true; }
+    require(failed, "decode failure was swallowed");
+    (void)engine.predict(u"", singleton);
+    require(model->calls.back().position == 0 && model->calls.back().tokens == tokenizer->tokenize(u"", singleton),
+        "failed decode left reusable partial cache");
+
+    const std::vector<llavon::ime::core::internal::PaddingEntry> chosen{{true, U'好', {}}, {false, 0, u"ㄋㄧˇ"}};
+    results = engine.predict(u"", chosen);
+    require(results[0].candidates.empty() && results[1].candidates.front().first == U'你', "manual choice was replaced");
+    require(model->calls.back().tokens == std::vector<int>{tokenizer->map_char(U'好')}, "chosen token missing from continuation");
+
+    const auto before_alias = model->calls.size();
+    results = engine.predict(u"", {{false, 0, u"ㄟ "}});
+    require(results.size() == 1 && results[0].candidates.empty() && model->calls.size() == before_alias,
+        "token-only alias changed the original candidate family");
+    require(model->calls.back().tokens.size() == 1, "final prediction was unnecessarily decoded");
+}
+} // namespace
+
+int main() {
+    try { test(); std::cout << "[ok] template prediction/cache/alias policies\n"; return EXIT_SUCCESS; }
+    catch (const std::exception& error) { std::cerr << "[FAIL] " << error.what() << '\n'; return EXIT_FAILURE; }
+}

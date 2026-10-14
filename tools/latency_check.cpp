@@ -18,6 +18,7 @@ using namespace std::chrono_literals;
 
 class TimingLogger final : public core::Logger {
 public:
+    using Logger::log;
     void log(std::string message) noexcept override {
         // Collect on the inference thread; flush only after the measurement.
         try { messages.push_back(std::move(message)); } catch (...) {}
@@ -41,7 +42,7 @@ private:
 
 int main(int argc, char** argv) {
     if (argc < 4) {
-        std::cerr << "usage: ime-core-latency-check MODEL TABLES VULKAN_DEVICE_ID "
+        std::cerr << "usage: ime-core-latency-check MODEL TABLES GPU_DEVICE_ID "
                      "[--cache-dir DIRECTORY] [--load-only]\n";
         return 2;
     }
@@ -51,7 +52,16 @@ int main(int argc, char** argv) {
         core::CoreConfig config;
         config.model_path = argv[1];
         config.tables_dir = argv[2];
-        config.inference_device = {core::InferenceBackend::vulkan, argv[3]};
+        const auto devices = core::enumerate_inference_devices();
+        const auto requested = std::ranges::find_if(devices, [&](const auto& device) {
+            return device.device_id == argv[3] && device.type != core::InferenceDeviceType::cpu;
+        });
+        if (requested == devices.end()) {
+            std::cerr << "requested GPU device is unavailable\n";
+            return 3;
+        }
+        config.inference_device = {requested->backend, requested->device_id};
+        config.gpu_layers = -2;
         bool load_only = false;
         for (int index = 4; index < argc; ++index) {
             const std::string_view argument(argv[index]);

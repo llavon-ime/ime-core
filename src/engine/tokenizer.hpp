@@ -76,10 +76,10 @@ public:
                fits(special_table) && fits(bpmf_table);
     }
 
-    static bool is_alpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
-    static bool is_digit(int c) { return (c >= '0' && c <= '9'); }
-    static bool is_latin_char(int c) { return is_alpha(c) || is_digit(c) || c == '-' || c == '_' || c == '+'; }
-    static char to_lower(int c) { return (c >= 'A' && c <= 'Z') ? char(c ^ 0x20) : char(c); }
+    static bool is_alpha(char32_t c) { return (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z'); }
+    static bool is_digit(char32_t c) { return (c >= U'0' && c <= U'9'); }
+    static bool is_latin_char(char32_t c) { return is_alpha(c) || is_digit(c) || c == U'-' || c == U'_' || c == U'+'; }
+    static char to_lower(char32_t c) { return static_cast<char>((c >= U'A' && c <= U'Z') ? c ^ 0x20 : c); }
 
     static void remove_leading_unknown_context_tokens(std::vector<int>& context_tokens, int unknown_token) {
         size_t first_kept = 0;
