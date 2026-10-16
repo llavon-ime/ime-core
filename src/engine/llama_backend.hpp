@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "../utils/core_paths.hpp"
+#include "engine.hpp"
 #include "vulkan_pipeline_warmup.hpp"
 
 namespace llavon::ime::core::internal {
@@ -35,7 +36,9 @@ struct LlamaOffloadDevice {
     std::size_t memory_total = 0;
 };
 
-class LlamaModel {
+class LlamaBackend;
+
+class LlamaModel final : public BackendModel {
 public:
     static std::vector<InferenceDeviceInfo> enumerate_devices() {
         initialize();
@@ -82,7 +85,7 @@ public:
         if (!vocab_ || llama_vocab_n_tokens(vocab_) <= 0) throw std::runtime_error("llama model has no vocabulary");
         const auto active = offload ? selected : select_cpu();
         if (!active.device) throw std::runtime_error("Failed to identify active llama inference device");
-        runtime_ = {device_info(active), offload, wants_gpu && !offload};
+        runtime_ = {InferenceProvider::llama_cpp, device_info(active), offload, wants_gpu && !offload};
         std::clog << "[CORE] active inference device backend=" << backend_name(runtime_.device.backend)
                   << " name=" << runtime_.device.name << " id=" << runtime_.device.device_id << '\n';
         if (offload && selected.backend == InferenceBackend::vulkan) {
@@ -97,8 +100,11 @@ public:
         }
     }
 
-    const InferenceRuntimeInfo& runtime_info() const noexcept { return runtime_; }
-    std::size_t vocabulary_size() const noexcept { return static_cast<std::size_t>(llama_vocab_n_tokens(vocab_)); }
+    const InferenceRuntimeInfo& runtime_info() const noexcept override { return runtime_; }
+    std::size_t vocabulary_size() const noexcept override {
+        return static_cast<std::size_t>(llama_vocab_n_tokens(vocab_));
+    }
+    std::unique_ptr<BackendSession> create_session() override;
     int warmup_token() const noexcept {
         for (const auto token : {llama_vocab_bos(vocab_), llama_vocab_eos(vocab_), llama_vocab_nl(vocab_), llama_vocab_pad(vocab_)})
             if (token >= 0) return token;
@@ -211,20 +217,19 @@ private:
     }
 };
 
-class LlamaBackend {
+class LlamaBackend final : public BackendSession {
 public:
-    using Model = LlamaModel;
-    explicit LlamaBackend(std::shared_ptr<Model> model) : model_(std::move(model)) {
+    explicit LlamaBackend(std::shared_ptr<LlamaModel> model) : model_(std::move(model)) {
         if (!model_) throw std::invalid_argument("llama backend requires a model");
         context_.reset(model_->new_context());
         clear();
     }
-    void clear() noexcept { llama_memory_clear(llama_get_memory(context_.get()), true); }
-    bool rewind(std::size_t position) {
+    void clear() noexcept override { llama_memory_clear(llama_get_memory(context_.get()), true); }
+    bool rewind(std::size_t position) override {
         if (position > static_cast<std::size_t>(std::numeric_limits<llama_pos>::max())) return false;
         return llama_memory_seq_rm(llama_get_memory(context_.get()), 0, static_cast<llama_pos>(position), -1);
     }
-    void ready() {
+    void ready() override {
         if (!warmup_) warmup_.reset(model_->new_context(8, 1));
         const int token = model_->warmup_token();
         llama_set_warmup(warmup_.get(), true);
@@ -237,17 +242,17 @@ public:
         llama_memory_clear(llama_get_memory(warmup_.get()), true);
         llama_set_warmup(warmup_.get(), false);
     }
-    void decode(std::span<const int> tokens, std::size_t position) {
+    void decode(std::span<const int> tokens, std::size_t position) override {
         execute(context_.get(), tokens, position);
     }
-    std::span<const float> logits() const {
+    std::span<const float> logits() const override {
         const auto* values = llama_get_logits_ith(context_.get(), -1);
         if (!values) throw std::runtime_error("llama returned no logits");
         return {values, model_->vocabulary_size()};
     }
 
 private:
-    std::shared_ptr<Model> model_;
+    std::shared_ptr<LlamaModel> model_;
     llama_context_ptr context_;
     llama_context_ptr warmup_;
 
@@ -279,5 +284,10 @@ private:
         if (result != 0) throw std::runtime_error("llama decode failed");
     }
 };
+
+inline std::unique_ptr<BackendSession> LlamaModel::create_session() {
+    return std::make_unique<LlamaBackend>(
+        std::static_pointer_cast<LlamaModel>(shared_from_this()));
+}
 
 } // namespace llavon::ime::core::internal

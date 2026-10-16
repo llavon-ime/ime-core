@@ -2,9 +2,13 @@
   "name": "ime-core",
   "version-string": "0.1.0",
   "dependencies": [
+    "llama-cpp",
     {
-      "name": "llama-cpp",
-      "platform": "!osx"
+      "name": "ggml",
+      "features": [
+        "metal"
+      ],
+      "platform": "osx"
     },
     "reflectcpp",
     "utfcpp"

@@ -6,18 +6,20 @@
 #include <vector>
 
 #include "../utils/core_paths.hpp"
+#include "engine.hpp"
 
 namespace llavon::ime::core::internal {
 
-class MlxModel {
+class MlxModel final : public BackendModel {
 public:
     explicit MlxModel(std::shared_ptr<const CorePaths> paths);
-    ~MlxModel();
+    ~MlxModel() override;
     MlxModel(const MlxModel&) = delete;
     MlxModel& operator=(const MlxModel&) = delete;
     static std::vector<InferenceDeviceInfo> enumerate_devices();
-    const InferenceRuntimeInfo& runtime_info() const noexcept;
-    std::size_t vocabulary_size() const noexcept;
+    const InferenceRuntimeInfo& runtime_info() const noexcept override;
+    std::size_t vocabulary_size() const noexcept override;
+    std::unique_ptr<BackendSession> create_session() override;
 
 private:
     class Impl;
@@ -25,20 +27,19 @@ private:
     friend class MlxBackend;
 };
 
-class MlxBackend {
+class MlxBackend final : public BackendSession {
 public:
-    using Model = MlxModel;
-    explicit MlxBackend(std::shared_ptr<Model> model);
-    ~MlxBackend();
+    explicit MlxBackend(std::shared_ptr<MlxModel> model);
+    ~MlxBackend() override;
     MlxBackend(MlxBackend&&) noexcept;
     MlxBackend& operator=(MlxBackend&&) noexcept;
     MlxBackend(const MlxBackend&) = delete;
     MlxBackend& operator=(const MlxBackend&) = delete;
-    void ready();
-    void clear() noexcept;
-    bool rewind(std::size_t position);
-    void decode(std::span<const int> tokens, std::size_t position);
-    std::span<const float> logits() const;
+    void ready() override;
+    void clear() noexcept override;
+    bool rewind(std::size_t position) override;
+    void decode(std::span<const int> tokens, std::size_t position) override;
+    std::span<const float> logits() const override;
 
 private:
     class Impl;

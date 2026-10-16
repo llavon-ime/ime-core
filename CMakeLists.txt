@@ -10,9 +10,15 @@ option(IME_CORE_BUILD_TOOLS "Build manual inference diagnostics (requires a mode
 
 find_package(reflectcpp CONFIG REQUIRED)
 find_package(utf8cpp CONFIG REQUIRED)
+find_package(llama CONFIG REQUIRED)
 
-# The sole platform selection point. Generated C++ types are injected into the
-# templates; no prediction/model/cache code contains a platform preprocessor.
+set(IME_CORE_HAS_MLX OFF)
+set(IME_CORE_PROVIDER_LIBRARIES llama)
+set(IME_CORE_PROVIDER_SOURCES "")
+set(IME_CORE_RUNTIME_FILES "")
+set(IME_CORE_PROVIDER_LICENSE_FILES "")
+set(IME_CORE_PROVIDER_DEPENDENCIES "find_dependency(llama CONFIG)")
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
@@ -21,29 +27,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     endif()
     include(cmake/MlxDependency.cmake)
     ime_core_add_mlx()
-    set(IME_CORE_BACKEND_HEADER "engine/mlx_backend.hpp")
-    set(IME_CORE_BACKEND_TYPE MlxBackend)
-    set(IME_CORE_BACKEND_PACKAGE MLX)
-    set(IME_CORE_BACKEND_LIBRARY mlx)
-    set(IME_CORE_BACKEND_SOURCES src/engine/mlx_backend.cpp)
-    # MLX searches beside the executable before any build-tree fallback.
+    set(IME_CORE_HAS_MLX ON)
+    list(APPEND IME_CORE_PROVIDER_LIBRARIES mlx)
+    list(APPEND IME_CORE_PROVIDER_SOURCES src/engine/mlx_backend.cpp)
     set(IME_CORE_RUNTIME_FILES "${MLX_METAL_PATH}/mlx.metallib")
     configure_file("${IME_CORE_MLX_SOURCE_DIR}/LICENSE" generated/MLX-LICENSE.txt COPYONLY)
     configure_file("${IME_CORE_MLX_GGUF_SOURCE_DIR}/LICENSE" generated/MLX-gguf-tools-LICENSE.txt COPYONLY)
-    set(IME_CORE_BACKEND_LICENSE_FILES
+    set(IME_CORE_PROVIDER_LICENSE_FILES
         "${CMAKE_CURRENT_BINARY_DIR}/generated/MLX-LICENSE.txt"
         "${CMAKE_CURRENT_BINARY_DIR}/generated/MLX-gguf-tools-LICENSE.txt")
-else()
-    find_package(llama CONFIG REQUIRED)
-    set(IME_CORE_BACKEND_HEADER "engine/llama_backend.hpp")
-    set(IME_CORE_BACKEND_TYPE LlamaBackend)
-    set(IME_CORE_BACKEND_PACKAGE llama)
-    set(IME_CORE_BACKEND_LIBRARY llama)
-    set(IME_CORE_BACKEND_SOURCES "")
-    set(IME_CORE_RUNTIME_FILES "")
-    set(IME_CORE_BACKEND_LICENSE_FILES "")
+    string(APPEND IME_CORE_PROVIDER_DEPENDENCIES "\nfind_dependency(MLX CONFIG)")
 endif()
-configure_file(cmake/backend_selection.hpp.in generated/backend_selection.hpp @ONLY)
 
 set(IME_CORE_UTF8_TARGET "")
 if(TARGET utf8cpp::utf8cpp)
@@ -61,22 +55,25 @@ add_library(ime-core STATIC
     include/ime-core/encoding_tables.hpp
     include/ime-core/logger.hpp
     src/bopomofo/bopomofo.hpp
-    src/engine/engine.hpp
+    src/engine/backend_factory.cpp
+    src/engine/backend_factory.hpp
+    src/engine/core_state.cpp
     src/engine/core_state.hpp
+    src/engine/engine.hpp
+    src/engine/llama_backend.hpp
+    src/engine/prediction_engine.cpp
     src/engine/prediction_engine.hpp
-    ${IME_CORE_BACKEND_SOURCES}
+    ${IME_CORE_PROVIDER_SOURCES}
     src/engine/tokenizer.hpp
     src/utils/core_paths.hpp
 )
 add_library(ime-core::ime-core ALIAS ime-core)
 set_property(TARGET ime-core PROPERTY IME_CORE_RUNTIME_FILES "${IME_CORE_RUNTIME_FILES}")
-set_property(TARGET ime-core PROPERTY IME_CORE_BACKEND_LICENSE_FILES "${IME_CORE_BACKEND_LICENSE_FILES}")
+set_property(TARGET ime-core PROPERTY IME_CORE_PROVIDER_LICENSE_FILES "${IME_CORE_PROVIDER_LICENSE_FILES}")
 
-# An embedding service uses EXCLUDE_FROM_ALL to avoid installing the whole SDK.
-# It must explicitly install these runtime files from its own install scope.
-function(ime_core_install_backend_resources)
+function(ime_core_install_provider_resources)
     get_target_property(runtime_files ime-core IME_CORE_RUNTIME_FILES)
-    get_target_property(license_files ime-core IME_CORE_BACKEND_LICENSE_FILES)
+    get_target_property(license_files ime-core IME_CORE_PROVIDER_LICENSE_FILES)
     if(runtime_files)
         install(FILES ${runtime_files} DESTINATION "${CMAKE_INSTALL_BINDIR}")
     endif()
@@ -84,7 +81,7 @@ function(ime_core_install_backend_resources)
         install(FILES ${license_files} DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/ime-core")
     endif()
 endfunction()
-ime_core_install_backend_resources()
+ime_core_install_provider_resources()
 
 target_compile_features(ime-core PUBLIC cxx_std_23)
 set_target_properties(ime-core PROPERTIES
@@ -104,10 +101,11 @@ target_include_directories(ime-core
 
 target_link_libraries(ime-core
     PRIVATE
-        ${IME_CORE_BACKEND_LIBRARY}
+        ${IME_CORE_PROVIDER_LIBRARIES}
         reflectcpp::reflectcpp
         ${IME_CORE_UTF8_TARGET}
 )
+target_compile_definitions(ime-core PRIVATE IME_CORE_HAS_MLX=$<BOOL:${IME_CORE_HAS_MLX}>)
 
 if(MSVC)
     target_compile_options(ime-core PRIVATE /W4 /WX /utf-8)
@@ -188,15 +186,13 @@ if(IME_CORE_BUILD_TESTS)
         "$<TARGET_PROPERTY:ime-core,COMPILE_OPTIONS>")
     add_test(NAME ime-core-prediction-tests COMMAND ime-core-prediction-tests)
 
-    # Optional native MLX CPU checks on Linux, without changing the production
-    # backend selected above. macOS already has the real MLX target.
     set(IME_CORE_MLX_TEST_ROOT "" CACHE PATH "Namespaced MLX SDK from MlxDependency.cmake for cross-backend tests")
     if(IME_CORE_MLX_TEST_ROOT AND NOT TARGET mlx)
         find_package(MLX 0.32.3 CONFIG REQUIRED PATHS "${IME_CORE_MLX_TEST_ROOT}" NO_DEFAULT_PATH)
     endif()
     if(TARGET mlx)
         add_executable(ime-core-mlx-backend-tests tests/mlx_backend_tests.cpp)
-        if(NOT IME_CORE_BACKEND_TYPE STREQUAL "MlxBackend")
+        if(NOT IME_CORE_HAS_MLX)
             target_sources(ime-core-mlx-backend-tests PRIVATE src/engine/mlx_backend.cpp)
         endif()
         target_compile_features(ime-core-mlx-backend-tests PRIVATE cxx_std_23)
@@ -209,7 +205,7 @@ if(IME_CORE_BUILD_TESTS)
         target_link_libraries(ime-core-mlx-backend-tests PRIVATE
             ime-core::ime-core mlx reflectcpp::reflectcpp ${IME_CORE_UTF8_TARGET})
         set(mlx_test_args "")
-        if(IME_CORE_BACKEND_TYPE STREQUAL "MlxBackend")
+        if(IME_CORE_HAS_MLX)
             set(mlx_test_args --require-metal)
         endif()
         add_test(NAME ime-core-mlx-backend-tests COMMAND ime-core-mlx-backend-tests ${mlx_test_args})

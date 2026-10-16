@@ -2,7 +2,7 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(@IME_CORE_BACKEND_PACKAGE@ CONFIG)
+@IME_CORE_PROVIDER_DEPENDENCIES@
 find_dependency(reflectcpp CONFIG)
 find_dependency(utf8cpp CONFIG)
 

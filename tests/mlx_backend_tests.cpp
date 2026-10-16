@@ -1,7 +1,10 @@
-#include "engine/core_state.hpp"
+#include "bopomofo/bopomofo.hpp"
+#include "engine/llama_backend.hpp"
 #include "engine/mlx_backend.hpp"
-#include "backend_selection.hpp"
+#include "engine/prediction_engine.hpp"
+#include "engine/tokenizer.hpp"
 
+#include <ime-core/logger.hpp>
 #include <mlx/mlx.h>
 
 #include <algorithm>
@@ -57,7 +60,6 @@ public:
             weights.emplace(prefix + "ffn_norm.weight", mx::ones({hidden}, mx::float16, cpu));
             for (const auto* name : {"attn_q", "attn_output"})
                 weights.emplace(prefix + name + ".weight", matrix(hidden, hidden, static_cast<float>(i) + 0.3F));
-            // GQA fixture: two KV heads and four query heads.
             for (const auto* name : {"attn_k", "attn_v"})
                 weights.emplace(prefix + name + ".weight", matrix(16, hidden, static_cast<float>(i) + 0.4F));
             for (const auto* name : {"ffn_gate", "ffn_up"})
@@ -98,7 +100,6 @@ void q4_k_reader() {
     integer(2, 4); integer(256, 8); integer(1, 8); integer(12, 4); integer(0, 8);
     const auto position = static_cast<std::uint64_t>(file.tellp());
     for (std::uint64_t i = position; i % 32 != 0; ++i) file.put(0);
-    // Q4_K: d=1, dmin=0.5, distinct scales/mins, q=3 throughout.
     integer(0x3c00, 2); integer(0x3800, 2);
     for (const unsigned byte : {1U, 2U, 3U, 4U, 8U, 7U, 6U, 5U, 0x45U, 0x36U, 0x27U, 0x18U})
         file.put(static_cast<char>(byte));
@@ -150,8 +151,6 @@ void run(const Fixture& fixture, bool gpu) {
     incremental.decode(prompt, 0);
     equal_logits(expected, incremental.logits());
 
-    // Sessions can be scheduled on different service worker threads. In
-    // particular Metal must not retain a thread-local command encoder.
     std::exception_ptr first_error, second_error;
     std::jthread first_worker([&] {
         try { full.clear(); full.decode(prompt, 0); equal_logits(expected, full.logits()); }
@@ -165,14 +164,11 @@ void run(const Fixture& fixture, bool gpu) {
     if (first_error) std::rethrow_exception(first_error);
     if (second_error) std::rethrow_exception(second_error);
 
-    CoreConfig config;
-    config.model_path = fixture.path;
-    config.tables_dir = IME_CORE_TEST_TABLES_DIR;
-    config.context_length = 64;
-    config.gpu_layers = gpu ? -2 : 0;
-    config.logger = std::make_shared<QuietLogger>();
-    CoreState<MlxBackend> state(config);
-    auto engine = state.create_engine();
+    PredictionEngine engine(
+        model->create_session(),
+        std::make_shared<Tokenizer>(*paths),
+        std::make_shared<HanziMapEngine>(*paths),
+        std::make_shared<QuietLogger>());
     const std::vector<llavon::ime::core::internal::PaddingEntry> readings{{false, 0, u"ㄋㄧˇ"}, {false, 0, u"ㄏㄠˇ"}};
     const auto first = engine.predict(u"", readings);
     const auto second = engine.predict(u"", readings);
@@ -192,25 +188,22 @@ void run(const Fixture& fixture, bool gpu) {
     require(alias.size() == 1 && alias.front().candidates.empty(), "MLX alias changed candidate character");
 }
 
-template<BackendPolicy Reference>
 void installed_model(const std::filesystem::path& path, bool gpu) {
-    CoreConfig config;
-    config.model_path = path;
-    config.tables_dir = IME_CORE_TEST_TABLES_DIR;
-    config.context_length = 512;
-    config.gpu_layers = gpu ? -2 : 0;
-    config.logger = std::make_shared<QuietLogger>();
-    CoreState<MlxBackend> state(config);
-    require(state.runtime_info().gpu_offload == gpu, "installed model used an unexpected device");
-    auto engine = state.create_engine();
-    std::optional<PredictionEngine<Reference>> reference;
-    auto reference_config = config;
-    reference_config.gpu_layers = 0;
-    CoreState<Reference> baseline(reference_config);
-    reference.emplace(baseline.create_engine());
+    const auto mlx_paths = std::make_shared<CorePaths>(
+        path, IME_CORE_TEST_TABLES_DIR, std::filesystem::path{}, 512, 8, gpu ? -2 : 0);
+    const auto mlx_model = std::make_shared<MlxModel>(mlx_paths);
+    require(mlx_model->runtime_info().gpu_offload == gpu, "installed model used an unexpected device");
+    const auto tokenizer = std::make_shared<Tokenizer>(*mlx_paths);
+    const auto family = std::make_shared<HanziMapEngine>(*mlx_paths);
+    const auto logger = std::make_shared<QuietLogger>();
+    PredictionEngine engine(mlx_model->create_session(), tokenizer, family, logger);
+
+    const auto llama_paths = std::make_shared<CorePaths>(
+        path, IME_CORE_TEST_TABLES_DIR, std::filesystem::path{}, 512, 8, 0);
+    const auto llama_model = std::make_shared<LlamaModel>(llama_paths);
+    PredictionEngine reference(llama_model->create_session(), tokenizer, family, logger);
     const auto compare = [&](const auto& actual, const auto& readings, const std::u16string& context = u"") {
-        if (!reference) return;
-        const auto expected = reference->predict(context, readings);
+        const auto expected = reference.predict(context, readings);
         require(expected.size() == actual.size(), "backend segment counts differ");
         for (std::size_t i = 0; i < actual.size(); ++i) {
             require(actual[i].candidates.size() == expected[i].candidates.size(), "backend candidate masks differ");
@@ -290,8 +283,8 @@ int main(int argc, char** argv) {
         if (metal) run(fixture, true);
         else std::cout << "[skip] MLX Metal device unavailable; CPU path verified\n";
         if (!model.empty()) {
-            installed_model<SelectedBackend>(model, false);
-            if (metal) installed_model<SelectedBackend>(model, true);
+            installed_model(model, false);
+            if (metal) installed_model(model, true);
         }
         std::cout << "[ok] native MLX GGUF, forward, GQA, KV rewind, warmup and IME templates\n";
         return EXIT_SUCCESS;

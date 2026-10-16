@@ -1,7 +1,0 @@
-#pragma once
-
-#include "@IME_CORE_BACKEND_HEADER@"
-
-namespace llavon::ime::core::internal {
-using SelectedBackend = @IME_CORE_BACKEND_TYPE@;
-}

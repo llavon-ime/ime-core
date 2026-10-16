@@ -1,4 +1,3 @@
-# Pinned native dependency; called only by the platform selection block.
 function(ime_core_add_mlx)
     include(FetchContent)
     set(MLX_BUILD_TESTS OFF CACHE BOOL "Build MLX upstream tests" FORCE)
@@ -14,9 +13,7 @@ function(ime_core_add_mlx)
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(ime_core_mlx)
     FetchContent_GetProperties(gguflib)
-    # The pinned gguf-tools reader uses scales[b]/mins[b] for both halves of
-    # each Q4_K pair. The second half must use b+1. Generate a build-local copy
-    # instead of modifying downloaded source; fail if the pinned layout changes.
+    # Correct the pinned Q4_K second-half scale indices.
     file(READ "${gguflib_SOURCE_DIR}/gguflib.c" parser_source)
     set(second_half "            /* Second set: lower bits. */\n            for (uint32_t j = 0; j < 32; j++) {")
     string(FIND "${parser_source}" "${second_half}" second_half_offset)
@@ -30,9 +27,7 @@ function(ime_core_add_mlx)
     file(WRITE "${patched_parser}" "${parser_source}")
     set_property(TARGET gguflib PROPERTY SOURCES "${gguflib_SOURCE_DIR}/fp16.c" "${patched_parser}")
     target_include_directories(gguflib PRIVATE "${gguflib_SOURCE_DIR}")
-    # MLX's private gguf-tools C API is not ggml's GGUF API. Without namespacing,
-    # static links / ELF interposition can bind load_gguf to an incompatible
-    # gguf_get_key and abort. Keep both inference libraries safe in one process.
+    # Namespace gguf-tools symbols because llama.cpp exports incompatible names.
     set(parser_functions
         gguf_append_kv gguf_append_tensor_data gguf_append_tensor_info gguf_close
         gguf_create gguf_do_with_value gguf_get_alignment_padding gguf_get_key
@@ -43,8 +38,7 @@ function(ime_core_add_mlx)
         target_compile_definitions(mlx PRIVATE "${name}=ime_core_mlx_${name}")
         target_compile_definitions(gguflib PRIVATE "${name}=ime_core_mlx_${name}")
     endforeach()
-    # Upstream's gguflib link is build-interface-only. Embed its private objects
-    # in libmlx so installed static SDK consumers do not lose the reader symbols.
+    # Keep the private GGUF reader available to installed static consumers.
     target_sources(mlx PRIVATE "${gguflib_SOURCE_DIR}/fp16.c" "${patched_parser}")
     set_source_files_properties("${patched_parser}" TARGET_DIRECTORY mlx gguflib
         PROPERTIES COMPILE_OPTIONS "-UNDEBUG")

@@ -1,12 +1,14 @@
-#include "engine/core_state.hpp"
+#include "bopomofo/bopomofo.hpp"
+#include "engine/prediction_engine.hpp"
+#include "engine/tokenizer.hpp"
+
+#include <ime-core/logger.hpp>
 
 #include <cstdlib>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -21,7 +23,9 @@ public:
     void log(MessageFactory) noexcept override {}
 };
 
-struct FakeModel {
+class FakeBackend;
+
+struct FakeModel final : BackendModel {
     struct Decode { std::size_t position; std::vector<int> tokens; };
     std::vector<Decode> calls;
     std::vector<std::size_t> rewinds;
@@ -30,47 +34,45 @@ struct FakeModel {
     bool fail_decode = false;
     bool reject_rewind = false;
     InferenceRuntimeInfo runtime;
-    explicit FakeModel(std::shared_ptr<const CorePaths>) {}
-    static std::vector<InferenceDeviceInfo> enumerate_devices() { return {}; }
-    const InferenceRuntimeInfo& runtime_info() const { return runtime; }
-    std::size_t vocabulary_size() const { return 65536; }
+    const InferenceRuntimeInfo& runtime_info() const noexcept override { return runtime; }
+    std::size_t vocabulary_size() const noexcept override { return 65536; }
+    std::unique_ptr<BackendSession> create_session() override;
 };
 
-class FakeBackend {
+class FakeBackend final : public BackendSession {
 public:
-    using Model = FakeModel;
-    explicit FakeBackend(std::shared_ptr<Model> model) : model_(std::move(model)) {
+    explicit FakeBackend(std::shared_ptr<FakeModel> model) : model_(std::move(model)) {
         values_.resize(model_->vocabulary_size());
         const Tokenizer tokenizer(IME_CORE_TEST_TABLES_DIR);
         values_.at(static_cast<std::size_t>(tokenizer.map_char(U'你'))) = 10;
         values_.at(static_cast<std::size_t>(tokenizer.map_char(U'好'))) = 9;
     }
-    void ready() { ++model_->warmups; }
-    void clear() { ++model_->clears; offset_ = 0; }
-    bool rewind(std::size_t position) {
+    void ready() override { ++model_->warmups; }
+    void clear() noexcept override { ++model_->clears; offset_ = 0; }
+    bool rewind(std::size_t position) override {
         model_->rewinds.push_back(position);
         if (model_->reject_rewind) return false;
         if (position > offset_) throw std::logic_error("rewind exceeds cache");
         offset_ = position;
         return true;
     }
-    void decode(std::span<const int> tokens, std::size_t position) {
+    void decode(std::span<const int> tokens, std::size_t position) override {
         if (position != offset_) throw std::logic_error("incorrect cache position");
         model_->calls.push_back({position, {tokens.begin(), tokens.end()}});
         offset_ += tokens.size();
         if (std::exchange(model_->fail_decode, false)) throw std::runtime_error("partial decode failure");
     }
-    std::span<const float> logits() const { return values_; }
+    std::span<const float> logits() const override { return values_; }
 private:
-    std::shared_ptr<Model> model_;
+    std::shared_ptr<FakeModel> model_;
     std::vector<float> values_;
     std::size_t offset_ = 0;
 };
 
-static_assert(BackendPolicy<FakeBackend>);
-static_assert(!BackendPolicy<int>);
-static_assert(!std::is_polymorphic_v<FakeBackend>);
-static_assert(!std::is_polymorphic_v<PredictionEngine<FakeBackend>>);
+std::unique_ptr<BackendSession> FakeModel::create_session() {
+    return std::make_unique<FakeBackend>(
+        std::static_pointer_cast<FakeModel>(shared_from_this()));
+}
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -80,8 +82,8 @@ void test() {
     const auto tokenizer = std::make_shared<Tokenizer>(IME_CORE_TEST_TABLES_DIR);
     const auto family = std::make_shared<HanziMapEngine>(IME_CORE_TEST_TABLES_DIR);
     const auto logger = std::make_shared<QuietLogger>();
-    const auto model = std::make_shared<FakeModel>(nullptr);
-    PredictionEngine<FakeBackend> engine(model, tokenizer, family, logger);
+    const auto model = std::make_shared<FakeModel>();
+    PredictionEngine engine(model->create_session(), tokenizer, family, logger);
     engine.ready(); engine.ready();
     require(model->warmups == 1 && model->calls.empty(), "warmup touched prediction state");
 
@@ -132,6 +134,6 @@ void test() {
 } // namespace
 
 int main() {
-    try { test(); std::cout << "[ok] template prediction/cache/alias policies\n"; return EXIT_SUCCESS; }
+    try { test(); std::cout << "[ok] prediction/cache/alias policies\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << "[FAIL] " << error.what() << '\n'; return EXIT_FAILURE; }
 }

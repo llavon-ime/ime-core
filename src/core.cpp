@@ -1,7 +1,8 @@
 #include <ime-core/core.hpp>
 
-#include "backend_selection.hpp"
+#include "engine/backend_factory.hpp"
 #include "engine/core_state.hpp"
+#include "engine/tokenizer.hpp"
 
 #include <memory>
 #include <stdexcept>
@@ -9,14 +10,18 @@
 
 namespace llavon::ime::core {
 
-class Core::Impl final : public internal::CoreState<internal::SelectedBackend> {
+class Core::Impl final {
 public:
-    using CoreState::CoreState;
+    explicit Impl(CoreConfig config) : state(std::move(config)) {}
+
+    internal::CoreState state;
 };
 
-class Session::Impl final : public internal::SessionState<internal::SelectedBackend> {
+class Session::Impl final {
 public:
-    using SessionState::SessionState;
+    explicit Impl(internal::PredictionEngine value) : engine(std::move(value)) {}
+
+    internal::PredictionEngine engine;
 };
 
 Session::Session(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {
@@ -46,18 +51,19 @@ Core::~Core() = default;
 Core::Core(Core&&) noexcept = default;
 Core& Core::operator=(Core&&) noexcept = default;
 
-std::vector<InferenceDeviceInfo> enumerate_inference_devices() {
-    return internal::SelectedBackend::Model::enumerate_devices();
+std::vector<InferenceDeviceInfo> enumerate_inference_devices(InferenceProvider provider) {
+    return internal::enumerate_backend_devices(provider);
 }
 
 std::unique_ptr<Session> Core::create_session() const {
     if (!impl_) throw std::logic_error("ime-core has been moved from");
-    return std::unique_ptr<Session>(new Session(std::make_unique<Session::Impl>(*impl_)));
+    return std::unique_ptr<Session>(
+        new Session(std::make_unique<Session::Impl>(impl_->state.create_engine())));
 }
 
 InferenceRuntimeInfo Core::inference_runtime_info() const {
     if (!impl_) throw std::logic_error("ime-core has been moved from");
-    return impl_->runtime_info();
+    return impl_->state.runtime_info();
 }
 
 } // namespace llavon::ime::core

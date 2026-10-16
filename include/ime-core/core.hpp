@@ -11,6 +11,11 @@ namespace llavon::ime::core {
 
 class Logger;
 
+enum class InferenceProvider : std::uint8_t {
+    llama_cpp,
+    mlx,
+};
+
 enum class InferenceBackend : std::uint8_t {
     automatic,
     cpu,
@@ -41,10 +46,15 @@ struct InferenceDeviceInfo {
 };
 
 struct InferenceRuntimeInfo {
+    InferenceProvider provider = InferenceProvider::llama_cpp;
     InferenceDeviceInfo device;
     bool gpu_offload = false;
     bool fell_back_to_cpu = false;
 };
+
+InferenceProvider default_inference_provider() noexcept;
+bool inference_provider_available(InferenceProvider provider) noexcept;
+std::vector<InferenceProvider> available_inference_providers();
 
 struct CoreConfig {
     std::filesystem::path model_path;
@@ -55,14 +65,13 @@ struct CoreConfig {
     std::uint32_t context_length = 0;
     std::uint32_t threads = 8;
     int gpu_layers = -2;
+    InferenceProvider inference_provider = default_inference_provider();
     InferenceDeviceSelection inference_device;
     std::shared_ptr<Logger> logger;
 };
 
-// Enumerates devices from the inference backends that are available in the
-// current process. This function does not load a model or read application
-// settings.
-std::vector<InferenceDeviceInfo> enumerate_inference_devices();
+std::vector<InferenceDeviceInfo> enumerate_inference_devices(
+    InferenceProvider provider = default_inference_provider());
 
 struct PaddingEntry {
     bool chosen = false;

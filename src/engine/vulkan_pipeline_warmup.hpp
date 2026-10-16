@@ -9,11 +9,7 @@
 
 namespace llavon::ime::core::internal {
 
-// ggml's Vulkan backend specializes small matrix-vector batches separately.
-// A one-token decode does not prepare the 2..8-token pipelines. Larger batches
-// select matrix-matrix kernels by size. Exercise these paths once at model
-// load, including attention with a populated KV cache, before accepting input.
-// This does not run periodically and does not change the inference batch size.
+// Prepare Vulkan kernels that a one-token warmup does not cover.
 inline void prepare_vulkan_pipelines(llama_context* context, llama_token token) {
     const auto capacity = std::min(llama_n_ctx(context), llama_n_batch(context));
     if (capacity == 0) throw std::runtime_error("invalid Vulkan warmup capacity");

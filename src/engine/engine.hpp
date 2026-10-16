@@ -1,13 +1,11 @@
 #pragma once
 
-#include <concepts>
 #include <cstddef>
 #include <memory>
 #include <span>
-#include <utility>
 #include <vector>
 
-#include "../utils/core_paths.hpp"
+#include <ime-core/core.hpp>
 
 namespace llavon::ime::core::internal {
 
@@ -15,22 +13,24 @@ struct PredictResult {
     std::vector<std::pair<char32_t, float>> candidates;
 };
 
-// Backend policies supply model execution, never IME reading/candidate rules.
-// There is no virtual dispatch or platform selection in the prediction loop.
-template<class Backend>
-concept BackendPolicy = requires(Backend& backend, const Backend& view,
-                                 const typename Backend::Model& model,
-                                 std::span<const int> tokens, std::size_t position) {
-    requires std::constructible_from<typename Backend::Model, std::shared_ptr<const CorePaths>>;
-    requires std::constructible_from<Backend, std::shared_ptr<typename Backend::Model>>;
-    { Backend::Model::enumerate_devices() } -> std::same_as<std::vector<InferenceDeviceInfo>>;
-    { model.runtime_info() } -> std::same_as<const InferenceRuntimeInfo&>;
-    { model.vocabulary_size() } -> std::convertible_to<std::size_t>;
-    { backend.ready() } -> std::same_as<void>;
-    { backend.clear() } -> std::same_as<void>;
-    { backend.rewind(position) } -> std::same_as<bool>;
-    { backend.decode(tokens, position) } -> std::same_as<void>;
-    { view.logits() } -> std::same_as<std::span<const float>>;
+class BackendSession {
+public:
+    virtual ~BackendSession() = default;
+
+    virtual void ready() = 0;
+    virtual void clear() noexcept = 0;
+    virtual bool rewind(std::size_t position) = 0;
+    virtual void decode(std::span<const int> tokens, std::size_t position) = 0;
+    virtual std::span<const float> logits() const = 0;
+};
+
+class BackendModel : public std::enable_shared_from_this<BackendModel> {
+public:
+    virtual ~BackendModel() = default;
+
+    virtual const InferenceRuntimeInfo& runtime_info() const noexcept = 0;
+    virtual std::size_t vocabulary_size() const noexcept = 0;
+    virtual std::unique_ptr<BackendSession> create_session() = 0;
 };
 
 }  // namespace llavon::ime::core::internal
