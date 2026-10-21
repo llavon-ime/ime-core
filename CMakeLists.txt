@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(ime_core VERSION 0.1.0 LANGUAGES CXX)
+project(ime_core VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
