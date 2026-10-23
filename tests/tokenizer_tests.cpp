@@ -1,6 +1,7 @@
 #include "bopomofo/bopomofo.hpp"
 #include "engine/tokenizer.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -29,6 +30,14 @@ int main() {
         if (candidates.lookup_all(u"ㄟ ") != std::vector<char32_t>{U'ㄟ'} ||
             candidates.lookup_all(u"ㄟˋ") != std::vector<char32_t>{U'欸'}) {
             std::cerr << "[FAIL] first- and fourth-tone candidates changed\n";
+            return EXIT_FAILURE;
+        }
+
+        const auto first_tone_zhi = candidates.lookup_all(u"ㄓ ");
+        const auto third_tone_zhi = candidates.lookup_all(u"ㄓˇ");
+        if (std::ranges::count(first_tone_zhi, U'脂') != 1 ||
+            std::ranges::count(third_tone_zhi, U'脂') != 1) {
+            std::cerr << "[FAIL] 脂 must support both first- and third-tone readings\n";
             return EXIT_FAILURE;
         }
 
