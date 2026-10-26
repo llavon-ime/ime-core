@@ -24,7 +24,8 @@ CoreState::CoreState(CoreConfig config) : logger_(std::move(config.logger)) {
         config.context_length,
         config.threads,
         config.gpu_layers,
-        config.inference_device);
+        config.inference_device,
+        config.sessions_per_context);
     tokenizer_ = std::make_shared<Tokenizer>(*paths);
     hanzi_map_ = std::make_shared<HanziMapEngine>(*paths);
     model_ = create_backend_model(config.inference_provider, paths);

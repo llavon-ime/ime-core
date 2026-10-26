@@ -15,7 +15,8 @@ public:
               std::filesystem::path vulkan_pipeline_cache_dir = {},
               std::uint32_t context_length = 0, std::uint32_t threads = 8,
               int gpu_layers = -2,
-              InferenceDeviceSelection inference_device = {})
+              InferenceDeviceSelection inference_device = {},
+              std::uint32_t sessions_per_context = 1)
         : model_path_(normalize(std::move(model_path))),
           tables_dir_(normalize(std::move(tables_dir))),
           vulkan_pipeline_cache_dir_(normalize_optional(
@@ -23,7 +24,8 @@ public:
           context_length_(context_length),
           threads_(threads),
           gpu_layers_(gpu_layers),
-          inference_device_(std::move(inference_device)) {
+          inference_device_(std::move(inference_device)),
+          sessions_per_context_(sessions_per_context) {
 
         if (!std::filesystem::is_regular_file(model_path_)) {
             throw std::runtime_error("model file not found: " + model_path_.string());
@@ -40,6 +42,8 @@ public:
         require_file(tables_dir_ / "bopomofo_char.json");
 
         if (threads_ == 0) throw std::runtime_error("threads must be positive");
+        if (sessions_per_context_ == 0)
+            throw std::runtime_error("sessions per context must be positive");
     }
 
     const std::filesystem::path& model_path() const noexcept { return model_path_; }
@@ -49,6 +53,7 @@ public:
     }
 
     std::uint32_t context_length() const noexcept { return context_length_; }
+    std::uint32_t sessions_per_context() const noexcept { return sessions_per_context_; }
     std::uint32_t threads() const noexcept { return threads_; }
     int gpu_layers() const noexcept { return gpu_layers_; }
     const InferenceDeviceSelection& inference_device() const noexcept {
@@ -80,6 +85,7 @@ private:
     std::uint32_t threads_ = 8;
     int gpu_layers_ = -2;
     InferenceDeviceSelection inference_device_;
+    std::uint32_t sessions_per_context_ = 1;
 };
 
 }  // namespace llavon::ime::core::internal

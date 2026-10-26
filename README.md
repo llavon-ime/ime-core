@@ -52,7 +52,8 @@ auto predictions = session->predict(context, padding);
 | `inference_provider` | 推論引擎；macOS 預設為 MLX，其他平台為 llama.cpp |
 | `inference_device` | 推論後端與裝置 ID；預設為 `automatic` |
 | `gpu_layers` | 要放到 GPU 的層數；`-2` 或 `-1` 表示全部，`0` 表示只用 CPU |
-| `context_length` | context 長度；`0` 表示使用預設值 |
+| `context_length` | 每個 session 的 context 長度；`0` 表示使用預設值 |
+| `sessions_per_context` | llama.cpp 每個 context 容納的 session 數，同一 context 的 session 以不同 sequence 共用 compute buffer；預設為 1 |
 | `threads` | CPU 推論執行緒數，預設為 8 |
 | `vulkan_pipeline_cache_dir` | Vulkan pipeline 快取目錄；留空則不使用持久快取 |
 | `logger` | 記錄器（必填），詳見下方「記錄」 |

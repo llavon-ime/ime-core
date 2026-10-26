@@ -11,7 +11,7 @@ namespace llavon::ime::core::internal {
 
 // Prepare Vulkan kernels that a one-token warmup does not cover.
 inline void prepare_vulkan_pipelines(llama_context* context, llama_token token) {
-    const auto capacity = std::min(llama_n_ctx(context), llama_n_batch(context));
+    const auto capacity = std::min(llama_n_ctx_seq(context), llama_n_batch(context));
     if (capacity == 0) throw std::runtime_error("invalid Vulkan warmup capacity");
 
     std::vector<std::uint32_t> sizes;

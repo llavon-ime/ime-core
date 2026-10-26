@@ -18,6 +18,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,40 @@ struct LlamaOffloadDevice {
 };
 
 class LlamaBackend;
+
+class LlamaSharedContext final {
+public:
+    explicit LlamaSharedContext(llama_context* context) : context_(context) {
+        if (!context_) throw std::invalid_argument("llama shared context requires a context");
+        for (auto id = static_cast<llama_seq_id>(llama_n_seq_max(context_.get())); id-- > 0;)
+            free_.push_back(id);
+    }
+
+    llama_context* get() const noexcept { return context_.get(); }
+
+    std::optional<llama_seq_id> reserve() {
+        const std::lock_guard lock(mutex_);
+        if (free_.empty()) return std::nullopt;
+        const auto id = free_.back();
+        free_.pop_back();
+        return id;
+    }
+    void release(llama_seq_id id) noexcept {
+        const std::lock_guard lock(mutex_);
+        llama_memory_seq_rm(llama_get_memory(context_.get()), id, -1, -1);
+        free_.push_back(id);
+    }
+    template <typename F>
+    decltype(auto) with(F&& f) {
+        const std::lock_guard lock(mutex_);
+        return std::forward<F>(f)(context_.get());
+    }
+
+private:
+    std::mutex mutex_;
+    llama_context_ptr context_;
+    std::vector<llama_seq_id> free_;
+};
 
 class LlamaModel final : public BackendModel {
 public:
@@ -89,8 +124,9 @@ public:
         std::clog << "[CORE] active inference device backend=" << backend_name(runtime_.device.backend)
                   << " name=" << runtime_.device.name << " id=" << runtime_.device.device_id << '\n';
         if (offload && selected.backend == InferenceBackend::vulkan) {
-            llama_context_ptr context{new_context()};
-            prepare_vulkan_pipelines(context.get(), warmup_token());
+            auto context = std::make_shared<LlamaSharedContext>(
+                new_context(0, 0, paths_->sessions_per_context()));
+            prepare_vulkan_pipelines(context->get(), warmup_token());
             using Save = void (*)(ggml_backend_dev_t);
             const auto registry = ggml_backend_dev_backend_reg(selected.device);
             const auto save = reinterpret_cast<Save>(ggml_backend_reg_get_proc_address(
@@ -111,14 +147,75 @@ public:
         return 0;
     }
 
-    llama_context* new_context(std::uint32_t size = 0, std::uint32_t batch = 0) {
-        if (size == 0 && batch == 0) {
-            const std::lock_guard lock(prepared_mutex_);
-            if (prepared_context_) return prepared_context_.release();
+    std::pair<std::shared_ptr<LlamaSharedContext>, llama_seq_id> reserve_sequence() {
+        const std::lock_guard lock(contexts_mutex_);
+        std::erase_if(contexts_, [](const auto& context) { return context.expired(); });
+        for (const auto& weak : contexts_)
+            if (auto context = weak.lock())
+                if (const auto id = context->reserve()) return {std::move(context), *id};
+        auto context = prepared_context_ ? std::exchange(prepared_context_, nullptr)
+            : std::make_shared<LlamaSharedContext>(new_context(0, 0, paths_->sessions_per_context()));
+        const auto id = context->reserve();
+        if (!id) throw std::runtime_error("llama context has no free sequence");
+        contexts_.push_back(context);
+        return {std::move(context), *id};
+    }
+
+    void warm_up() {
+        const std::lock_guard lock(warmup_mutex_);
+        if (!warmup_) warmup_.reset(new_context(8, 1));
+        const int token = warmup_token();
+        llama_set_warmup(warmup_.get(), true);
+        try { decode(warmup_.get(), std::span(&token, 1), 0, 0); }
+        catch (...) {
+            llama_memory_clear(llama_get_memory(warmup_.get()), true);
+            llama_set_warmup(warmup_.get(), false);
+            throw;
         }
+        llama_memory_clear(llama_get_memory(warmup_.get()), true);
+        llama_set_warmup(warmup_.get(), false);
+    }
+
+    void decode(llama_context* context, std::span<const int> tokens, std::size_t position,
+                llama_seq_id sequence) const {
+        const auto limit = static_cast<std::size_t>(llama_n_ctx_seq(context));
+        if (tokens.empty() || position > limit || tokens.size() > limit - position ||
+            tokens.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+            throw std::invalid_argument("invalid llama decode extent");
+        for (const int token : tokens)
+            if (token < 0 || static_cast<std::size_t>(token) >= vocabulary_size())
+                throw std::invalid_argument("llama decode token exceeds vocabulary");
+        struct Batch {
+            llama_batch value;
+            explicit Batch(std::size_t size) : value(llama_batch_init(static_cast<std::int32_t>(size), 0, 1)) {}
+            ~Batch() { llama_batch_free(value); }
+            Batch(const Batch&) = delete;
+            Batch& operator=(const Batch&) = delete;
+        } batch(tokens.size());
+        auto& b = batch.value;
+        if (!b.token || !b.pos || !b.n_seq_id || !b.seq_id || !b.logits)
+            throw std::runtime_error("llama_batch_init failed");
+        b.n_tokens = static_cast<std::int32_t>(tokens.size());
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            b.token[i] = tokens[i]; b.pos[i] = static_cast<llama_pos>(position + i);
+            b.n_seq_id[i] = 1; b.seq_id[i][0] = sequence; b.logits[i] = static_cast<std::int8_t>(i + 1 == tokens.size());
+        }
+        const int result = llama_decode(context, b);
+        llama_synchronize(context);
+        if (result != 0) throw std::runtime_error("llama decode failed");
+    }
+
+private:
+    llama_context* new_context(std::uint32_t size, std::uint32_t batch, std::uint32_t sequences = 1) {
+        if (sequences > llama_max_parallel_sequences()) throw std::invalid_argument("llama sequence count exceeds supported range");
         auto params = llama_context_default_params();
-        if (size != 0) params.n_ctx = size;
-        else if (paths_->context_length() != 0) params.n_ctx = paths_->context_length();
+        std::uint32_t length = params.n_ctx;
+        if (size != 0) length = size;
+        else if (paths_->context_length() != 0) length = paths_->context_length();
+        if (length > std::numeric_limits<std::uint32_t>::max() / sequences)
+            throw std::invalid_argument("llama context length exceeds supported range");
+        params.n_ctx = length * sequences;
+        params.n_seq_max = sequences;
         if (batch != 0) { params.n_batch = batch; params.n_ubatch = batch; }
         if (paths_->threads() > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
             throw std::invalid_argument("llama thread count exceeds supported range");
@@ -129,13 +226,15 @@ public:
         return context;
     }
 
-private:
     std::shared_ptr<const CorePaths> paths_;
     llama_model_ptr model_;
     const llama_vocab* vocab_ = nullptr;
     InferenceRuntimeInfo runtime_;
-    std::mutex prepared_mutex_;
-    llama_context_ptr prepared_context_;
+    std::mutex contexts_mutex_;
+    std::shared_ptr<LlamaSharedContext> prepared_context_;
+    std::vector<std::weak_ptr<LlamaSharedContext>> contexts_;
+    std::mutex warmup_mutex_;
+    llama_context_ptr warmup_;
 
     static void initialize() {
         static std::once_flag once;
@@ -221,68 +320,44 @@ class LlamaBackend final : public BackendSession {
 public:
     explicit LlamaBackend(std::shared_ptr<LlamaModel> model) : model_(std::move(model)) {
         if (!model_) throw std::invalid_argument("llama backend requires a model");
-        context_.reset(model_->new_context());
-        clear();
+        std::tie(context_, sequence_) = model_->reserve_sequence();
     }
-    void clear() noexcept override { llama_memory_clear(llama_get_memory(context_.get()), true); }
+    ~LlamaBackend() override { context_->release(sequence_); }
+    LlamaBackend(const LlamaBackend&) = delete;
+    LlamaBackend& operator=(const LlamaBackend&) = delete;
+
+    void clear() noexcept override {
+        context_->with([this](llama_context* context) {
+            llama_memory_seq_rm(llama_get_memory(context), sequence_, -1, -1);
+        });
+        logits_.clear();
+    }
     bool rewind(std::size_t position) override {
         if (position > static_cast<std::size_t>(std::numeric_limits<llama_pos>::max())) return false;
-        return llama_memory_seq_rm(llama_get_memory(context_.get()), 0, static_cast<llama_pos>(position), -1);
+        return context_->with([&](llama_context* context) {
+            return llama_memory_seq_rm(llama_get_memory(context), sequence_, static_cast<llama_pos>(position), -1);
+        });
     }
-    void ready() override {
-        if (!warmup_) warmup_.reset(model_->new_context(8, 1));
-        const int token = model_->warmup_token();
-        llama_set_warmup(warmup_.get(), true);
-        try { execute(warmup_.get(), std::span(&token, 1), 0); }
-        catch (...) {
-            llama_memory_clear(llama_get_memory(warmup_.get()), true);
-            llama_set_warmup(warmup_.get(), false);
-            throw;
-        }
-        llama_memory_clear(llama_get_memory(warmup_.get()), true);
-        llama_set_warmup(warmup_.get(), false);
-    }
+    void ready() override { model_->warm_up(); }
     void decode(std::span<const int> tokens, std::size_t position) override {
-        execute(context_.get(), tokens, position);
+        logits_.clear();
+        context_->with([&](llama_context* context) {
+            model_->decode(context, tokens, position, sequence_);
+            const auto* values = llama_get_logits_ith(context, -1);
+            if (!values) throw std::runtime_error("llama returned no logits");
+            logits_.assign(values, values + model_->vocabulary_size());
+        });
     }
     std::span<const float> logits() const override {
-        const auto* values = llama_get_logits_ith(context_.get(), -1);
-        if (!values) throw std::runtime_error("llama returned no logits");
-        return {values, model_->vocabulary_size()};
+        if (logits_.empty()) throw std::runtime_error("llama returned no logits");
+        return logits_;
     }
 
 private:
     std::shared_ptr<LlamaModel> model_;
-    llama_context_ptr context_;
-    llama_context_ptr warmup_;
-
-    void execute(llama_context* context, std::span<const int> tokens, std::size_t position) {
-        const auto limit = static_cast<std::size_t>(llama_n_ctx(context));
-        if (tokens.empty() || position > limit || tokens.size() > limit - position ||
-            tokens.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
-            throw std::invalid_argument("invalid llama decode extent");
-        for (const int token : tokens)
-            if (token < 0 || static_cast<std::size_t>(token) >= model_->vocabulary_size())
-                throw std::invalid_argument("llama decode token exceeds vocabulary");
-        struct Batch {
-            llama_batch value;
-            explicit Batch(std::size_t size) : value(llama_batch_init(static_cast<std::int32_t>(size), 0, 1)) {}
-            ~Batch() { llama_batch_free(value); }
-            Batch(const Batch&) = delete;
-            Batch& operator=(const Batch&) = delete;
-        } batch(tokens.size());
-        auto& b = batch.value;
-        if (!b.token || !b.pos || !b.n_seq_id || !b.seq_id || !b.logits)
-            throw std::runtime_error("llama_batch_init failed");
-        b.n_tokens = static_cast<std::int32_t>(tokens.size());
-        for (std::size_t i = 0; i < tokens.size(); ++i) {
-            b.token[i] = tokens[i]; b.pos[i] = static_cast<llama_pos>(position + i);
-            b.n_seq_id[i] = 1; b.seq_id[i][0] = 0; b.logits[i] = static_cast<std::int8_t>(i + 1 == tokens.size());
-        }
-        const int result = llama_decode(context, b);
-        llama_synchronize(context);
-        if (result != 0) throw std::runtime_error("llama decode failed");
-    }
+    std::shared_ptr<LlamaSharedContext> context_;
+    llama_seq_id sequence_ = 0;
+    std::vector<float> logits_;
 };
 
 inline std::unique_ptr<BackendSession> LlamaModel::create_session() {

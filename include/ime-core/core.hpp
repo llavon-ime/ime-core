@@ -63,6 +63,7 @@ struct CoreConfig {
     // platform-specific location policy and must pass a directory explicitly.
     std::filesystem::path vulkan_pipeline_cache_dir;
     std::uint32_t context_length = 0;
+    std::uint32_t sessions_per_context = 1;
     std::uint32_t threads = 8;
     int gpu_layers = -2;
     InferenceProvider inference_provider = default_inference_provider();
