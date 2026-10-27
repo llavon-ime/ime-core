@@ -33,6 +33,8 @@ Session& Session::operator=(Session&&) noexcept = default;
 
 void Session::ready() { impl_->engine.ready(); }
 
+void Session::prefill(const std::u16string& context) { impl_->engine.prefill(context); }
+
 std::vector<Prediction> Session::predict(const std::u16string& context,
                                        const std::vector<PaddingEntry>& padding) {
     std::vector<internal::PaddingEntry> entries;

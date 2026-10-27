@@ -95,6 +95,7 @@ public:
     Session& operator=(const Session&) = delete;
 
     void ready();
+    void prefill(const std::u16string& context);
     std::vector<Prediction> predict(
         const std::u16string& context,
         const std::vector<PaddingEntry>& padding);

@@ -14,6 +14,13 @@
 
 namespace llavon::ime::core::internal {
 
+namespace {
+constexpr std::size_t refresh_window_length = 256;
+constexpr std::size_t maximum_window_length = 320;
+constexpr std::size_t retained_window_length = 128;
+constexpr std::size_t minimum_window_length = 32;
+} // namespace
+
 PredictionEngine::PredictionEngine(
     std::unique_ptr<BackendSession> backend,
     std::shared_ptr<const Tokenizer> tokenizer,
@@ -42,11 +49,44 @@ void PredictionEngine::ready() {
     last_touch_ = Clock::now();
 }
 
+void PredictionEngine::prefill(const std::u16string& context) {
+    const auto start = Clock::now();
+    const auto context_tokens = tokenizer_->tokenize_context(context);
+    auto window_start = select_window(context_tokens);
+    if (context_tokens.size() - window_start >= refresh_window_length) {
+        window_start += boundary_cut(std::span(context_tokens).subspan(window_start));
+    }
+    window_.assign(
+        context_tokens.begin() + static_cast<std::ptrdiff_t>(window_start),
+        context_tokens.end());
+    const auto prompt = window_prompt();
+    if (std::ranges::starts_with(cached_, prompt)) {
+        return;
+    }
+    try {
+        align_cache(prompt);
+    } catch (...) {
+        reset();
+        throw;
+    }
+
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        Clock::now() - start).count();
+    logger_->log(
+        LogInformation::general,
+        std::format("[TIME] prefill_ms={:.3f} window={}", elapsed, window_.size()));
+}
+
 std::vector<PredictResult> PredictionEngine::predict(
     const std::u16string& context,
     const std::vector<PaddingEntry>& padding) {
     const auto start = Clock::now();
-    const auto prompt = tokenizer_->tokenize(context, padding);
+    const auto context_tokens = tokenizer_->tokenize_context(context);
+    window_.assign(
+        context_tokens.begin() + static_cast<std::ptrdiff_t>(select_window(context_tokens)),
+        context_tokens.end());
+    auto prompt = window_prompt();
+    tokenizer_->append_padding(prompt, padding);
     logger_->log(
         LogInformation::context,
         [tokenizer = tokenizer_, context, prompt, count = padding.size()] {
@@ -110,8 +150,7 @@ std::vector<PredictResult> PredictionEngine::predict(
             pending.push_back(probabilities.front().first);
         }
     } catch (...) {
-        cached_.clear();
-        backend_->clear();
+        reset();
         throw;
     }
 
@@ -121,6 +160,48 @@ std::vector<PredictResult> PredictionEngine::predict(
         LogInformation::general,
         std::format("[TIME] predict_ms={:.3f}", elapsed));
     return results;
+}
+
+std::vector<int> PredictionEngine::window_prompt() const {
+    std::vector<int> prompt{tokenizer_->bos_token_id()};
+    prompt.insert(prompt.end(), window_.begin(), window_.end());
+    return prompt;
+}
+
+void PredictionEngine::reset() noexcept {
+    cached_.clear();
+    window_.clear();
+    backend_->clear();
+}
+
+std::size_t PredictionEngine::select_window(std::span<const int> context) const {
+    std::size_t best_start = 0;
+    std::size_t best_length = 0;
+    for (std::size_t start = 0; start < context.size() && best_length < window_.size(); ++start) {
+        const auto length = static_cast<std::size_t>(
+            std::ranges::mismatch(context.subspan(start), window_).in2 - window_.begin());
+        if (length >= best_length) {
+            best_start = start;
+            best_length = length;
+        }
+    }
+    const bool reusable = best_length >= std::min(window_.size(), minimum_window_length);
+    if (reusable && context.size() - best_start <= maximum_window_length) {
+        return best_start;
+    }
+    return context.size() > refresh_window_length ? boundary_cut(context) : 0;
+}
+
+std::size_t PredictionEngine::boundary_cut(std::span<const int> context) const {
+    const auto first = context.size() - std::min(context.size(), retained_window_length);
+    const auto last = context.size() - std::min(context.size(), minimum_window_length);
+    const auto candidates = context.subspan(first, last - first);
+    const auto boundary = std::ranges::find_if(
+        candidates, [this](int token) { return tokenizer_->is_boundary(token); });
+    if (boundary == candidates.end()) {
+        return first;
+    }
+    return first + static_cast<std::size_t>(boundary - candidates.begin()) + 1;
 }
 
 void PredictionEngine::align_cache(const std::vector<int>& prompt) {

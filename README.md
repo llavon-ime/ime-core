@@ -32,12 +32,15 @@ core::Core engine{core::CoreConfig{
 
 auto session = engine.create_session();
 session->ready();  // 閒置時預熱，可省略
+session->prefill(context);  // 開始組字時先填入前文，可省略
 auto predictions = session->predict(context, padding);
 ```
 
 - **`Core`**：持有已載入的模型。建構時就會載入模型；設定無效或載入失敗時拋出例外。
 - **`Session`**：由 `Core::create_session()` 建立，每位用戶端各一個，保有該用戶端的推論 context。
   `predict()` 回傳的 `Prediction` 與 `padding` 一一對應，每個位置都是一串 `(字, 分數)`。
+  `prefill()` 只處理前文：選定前文窗口並寫入 KV cache，讓後續同一段前文的 `predict()`
+  只需處理注音部分。前文過長時，窗口會在這裡截到最近的標點或空格之後。
 - **`PaddingEntry`**：表示一個待預測的位置，內含該位置的注音；若使用者已手動選字，
   則設定 `chosen` 與 `chosen_char`。
 - **`EncodingTables`**（`encoding_tables.hpp`）：不載入模型，只提供與推論相同的斷詞與候選字表，

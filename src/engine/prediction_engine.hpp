@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <string>
@@ -30,6 +31,7 @@ public:
     PredictionEngine& operator=(const PredictionEngine&) = delete;
 
     void ready();
+    void prefill(const std::u16string& context);
     std::vector<PredictResult> predict(
         const std::u16string& context,
         const std::vector<PaddingEntry>& padding);
@@ -37,6 +39,10 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
+    std::vector<int> window_prompt() const;
+    void reset() noexcept;
+    std::size_t select_window(std::span<const int> context) const;
+    std::size_t boundary_cut(std::span<const int> context) const;
     void align_cache(const std::vector<int>& prompt);
     void decode(std::span<const int> tokens);
     std::vector<std::pair<int, float>> masked_predict(
@@ -47,6 +53,7 @@ private:
     std::shared_ptr<const HanziMapEngine> hanzi_map_;
     std::shared_ptr<Logger> logger_;
     std::vector<int> cached_;
+    std::vector<int> window_;
     Clock::time_point last_touch_ = Clock::time_point::min();
 };
 

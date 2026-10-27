@@ -11,7 +11,9 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -31,6 +33,7 @@ class Tokenizer {
     std::unordered_map<std::string, int> special_table;
     std::unordered_map<std::string, int> bpmf_table;
     std::unordered_map<int, std::string> inverse_table;
+    std::unordered_set<int> boundary_tokens;
 
     template <typename Table>
     void add_inverse_tokens(const Table& table) {
@@ -59,6 +62,11 @@ public:
         add_inverse_tokens(latin_table);
         add_inverse_tokens(special_table);
         add_inverse_tokens(bpmf_table);
+
+        boundary_tokens.insert(special_table.at("<SP>"));
+        for (const auto c : std::u32string_view(U"，。、；：！？「」『』（）《》,.;:!?()")) {
+            if (const auto token = map_char(c); token >= 0) boundary_tokens.insert(token);
+        }
     }
 
     explicit Tokenizer(const CorePaths& paths) : Tokenizer(paths.tables_dir()) {}
@@ -96,10 +104,20 @@ public:
         return -1;
     }
 
+    int bos_token_id() const { return special_table.at("<BOS>"); }
+
+    bool is_boundary(int token) const { return boundary_tokens.contains(token); }
+
     std::vector<int> tokenize(const std::u16string& context16,
                               const std::vector<PaddingEntry>& padding) const {
-        std::vector<int> res;
-        res.push_back(special_table.at("<BOS>"));
+        std::vector<int> res{bos_token_id()};
+        const auto context = tokenize_context(context16);
+        res.insert(res.end(), context.begin(), context.end());
+        append_padding(res, padding);
+        return res;
+    }
+
+    std::vector<int> tokenize_context(const std::u16string& context16) const {
         std::vector<int> context_tokens;
         std::string context8 = utf8::utf16to8(context16);
         std::u32string context = utf8::utf8to32(context8);
@@ -130,7 +148,10 @@ public:
             }
         }
         remove_leading_unknown_context_tokens(context_tokens, special_table.at("<UNK>"));
-        res.insert(res.end(), context_tokens.begin(), context_tokens.end());
+        return context_tokens;
+    }
+
+    void append_padding(std::vector<int>& res, const std::vector<PaddingEntry>& padding) const {
         for (auto& entry : padding) {
             if (entry.is_chosen) {
                 std::string s;
@@ -154,7 +175,6 @@ public:
             }
         }
         res.push_back(special_table.at("<SEP>"));
-        return res;
     }
 
     std::u16string detokenize_context(std::span<const int> tokens,

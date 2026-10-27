@@ -9,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -131,9 +132,76 @@ void test() {
         "token-only alias changed the original candidate family");
     require(model->calls.back().tokens.size() == 1, "final prediction was unnecessarily decoded");
 }
+
+std::u16string distinct_text(const Tokenizer& tokenizer, char32_t first, std::size_t length, std::size_t punctuation_every) {
+    std::u16string text;
+    for (auto c = first; text.size() < length; ++c) {
+        if (punctuation_every != 0 && text.size() % punctuation_every == punctuation_every - 1) text.push_back(u'，');
+        else if (tokenizer.map_char(c) >= 0 && !tokenizer.is_boundary(tokenizer.map_char(c)) && c <= 0xFFFF)
+            text.push_back(static_cast<char16_t>(c));
+    }
+    return text;
+}
+
+std::size_t decoded_since(const FakeModel& model, std::size_t first) {
+    std::size_t total = 0;
+    for (auto index = first; index < model.calls.size(); ++index) total += model.calls[index].tokens.size();
+    return total;
+}
+
+void test_window() {
+    const auto tokenizer = std::make_shared<Tokenizer>(IME_CORE_TEST_TABLES_DIR);
+    const auto family = std::make_shared<HanziMapEngine>(IME_CORE_TEST_TABLES_DIR);
+    const auto logger = std::make_shared<QuietLogger>();
+    const auto model = std::make_shared<FakeModel>();
+    PredictionEngine engine(model->create_session(), tokenizer, family, logger);
+    const std::vector<llavon::ime::core::internal::PaddingEntry> singleton{{false, 0, u"ㄋㄧˇ"}};
+    const auto comma = tokenizer->map_char(U'，');
+
+    const auto text = distinct_text(*tokenizer, U'一', 800, 23);
+    (void)engine.predict(text.substr(0, 300), singleton);
+    std::size_t refreshes = 0;
+    for (std::size_t length = 301; length <= text.size(); ++length) {
+        const auto visible = length > 384 ? text.substr(length - 384, 384) : text.substr(0, length);
+        const auto before_prefill = model->calls.size();
+        engine.prefill(visible);
+        if (decoded_since(*model, before_prefill) > 1) {
+            ++refreshes;
+            const auto& refresh = model->calls.back();
+            require(refresh.position == 1 && refresh.tokens.size() <= 128 && refresh.tokens.size() >= 32,
+                "prefill refresh used an unexpected window");
+            const auto context = tokenizer->tokenize_context(visible);
+            const auto cut = context.end() - static_cast<std::ptrdiff_t>(refresh.tokens.size());
+            require(*(cut - 1) == comma, "prefill refresh did not cut after punctuation");
+        }
+        const auto before_predict = model->calls.size();
+        (void)engine.predict(visible, singleton);
+        require(decoded_since(*model, before_predict) == 2, "prediction after prefill decoded context");
+    }
+    require(refreshes >= 3, "long context never refreshed its window");
+
+    const auto before_repeat = model->calls.size();
+    engine.prefill(text.substr(text.size() - 384, 384));
+    require(model->calls.size() == before_repeat, "prefill discarded an aligned cache");
+
+    const auto before_backspace = model->calls.size();
+    (void)engine.predict(text.substr(text.size() - 384, 383), singleton);
+    require(decoded_since(*model, before_backspace) == 2, "backspace rebuilt the window");
+
+    const auto edited = distinct_text(*tokenizer, U'瀀', 300, 0);
+    const auto before_edit = model->calls.size();
+    (void)engine.predict(edited, singleton);
+    require(model->calls.back().position == 1 && decoded_since(*model, before_edit) == 128 + 2,
+        "edited context without punctuation did not fall back to a fixed cut");
+}
 } // namespace
 
 int main() {
-    try { test(); std::cout << "[ok] prediction/cache/alias policies\n"; return EXIT_SUCCESS; }
+    try {
+        test();
+        test_window();
+        std::cout << "[ok] prediction/cache/alias/window policies\n";
+        return EXIT_SUCCESS;
+    }
     catch (const std::exception& error) { std::cerr << "[FAIL] " << error.what() << '\n'; return EXIT_FAILURE; }
 }
