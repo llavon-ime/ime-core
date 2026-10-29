@@ -41,6 +41,21 @@ int main() {
             return EXIT_FAILURE;
         }
 
+        const auto third_tone_yu = candidates.lookup_all(u"ㄩˇ");
+        if (std::ranges::find(third_tone_yu, U'与') != third_tone_yu.end() ||
+            std::ranges::find(third_tone_yu, U'噢') != third_tone_yu.end()) {
+            std::cerr << "[FAIL] ㄩˇ contains an invalid candidate\n";
+            return EXIT_FAILURE;
+        }
+
+        const auto third_tone_shi = candidates.lookup_all(u"ㄕˇ");
+        const auto third_tone_chi = candidates.lookup_all(u"ㄔˇ");
+        if (std::ranges::count(third_tone_shi, U'匙') != 1 ||
+            std::ranges::find(third_tone_chi, U'匙') != third_tone_chi.end()) {
+            std::cerr << "[FAIL] 匙 must support ㄕˇ, not ㄔˇ\n";
+            return EXIT_FAILURE;
+        }
+
         const std::vector<PaddingEntry> mixed{
             {false, 0, u"ㄟ "}, {false, 0, u"ㄅㄟ "}, {false, 0, u"ㄟˊ"}, {true, U'ㄟ', u"ㄟ "}};
         const auto tokens = tokenizer.tokenize(u"", mixed);
