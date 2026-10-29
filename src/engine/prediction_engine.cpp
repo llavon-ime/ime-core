@@ -60,7 +60,8 @@ void PredictionEngine::prefill(const std::u16string& context) {
         context_tokens.begin() + static_cast<std::ptrdiff_t>(window_start),
         context_tokens.end());
     const auto prompt = window_prompt();
-    if (std::ranges::starts_with(cached_, prompt)) {
+    if (prompt.size() <= cached_.size() &&
+        std::equal(prompt.begin(), prompt.end(), cached_.begin())) {
         return;
     }
     try {
