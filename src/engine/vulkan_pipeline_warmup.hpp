@@ -36,29 +36,33 @@ inline void prepare_vulkan_pipelines(llama_context* context, llama_token token) 
     const auto memory = llama_get_memory(context);
     for (const bool populated : {false, true}) {
         for (const auto size : sizes) {
-            const auto position = static_cast<llama_pos>(populated ? capacity - size : 0);
-            if (!populated) {
-                llama_memory_clear(memory, true);
-            } else if (!llama_memory_seq_rm(memory, 0, position, -1)) {
-                throw std::runtime_error("failed to reset Vulkan warmup cache");
-            }
+            for (const auto outputs : {1u, size}) {
+                if (outputs == size && size == 1) continue;
+                const auto position = static_cast<llama_pos>(populated ? capacity - size : 0);
+                if (!populated) {
+                    llama_memory_clear(memory, true);
+                } else if (!llama_memory_seq_rm(memory, 0, position, -1)) {
+                    throw std::runtime_error("failed to reset Vulkan warmup cache");
+                }
 
-            Batch batch(size);
-            if (!batch.value.token || !batch.value.pos || !batch.value.n_seq_id ||
-                !batch.value.seq_id || !batch.value.logits) {
-                throw std::runtime_error("failed to allocate Vulkan warmup batch");
+                Batch batch(size);
+                if (!batch.value.token || !batch.value.pos || !batch.value.n_seq_id ||
+                    !batch.value.seq_id || !batch.value.logits) {
+                    throw std::runtime_error("failed to allocate Vulkan warmup batch");
+                }
+                batch.value.n_tokens = static_cast<std::int32_t>(size);
+                const auto first_output = static_cast<std::int32_t>(size - outputs);
+                for (std::int32_t i = 0; i < batch.value.n_tokens; ++i) {
+                    batch.value.token[i] = token;
+                    batch.value.pos[i] = position + i;
+                    batch.value.n_seq_id[i] = 1;
+                    batch.value.seq_id[i][0] = 0;
+                    batch.value.logits[i] = i >= first_output;
+                }
+                const int status = llama_decode(context, batch.value);
+                llama_synchronize(context);
+                if (status != 0) throw std::runtime_error("Vulkan pipeline warmup failed");
             }
-            batch.value.n_tokens = static_cast<std::int32_t>(size);
-            for (std::int32_t i = 0; i < batch.value.n_tokens; ++i) {
-                batch.value.token[i] = token;
-                batch.value.pos[i] = position + i;
-                batch.value.n_seq_id[i] = 1;
-                batch.value.seq_id[i][0] = 0;
-                batch.value.logits[i] = i == batch.value.n_tokens - 1;
-            }
-            const int status = llama_decode(context, batch.value);
-            llama_synchronize(context);
-            if (status != 0) throw std::runtime_error("Vulkan pipeline warmup failed");
         }
     }
     llama_memory_clear(memory, true);
