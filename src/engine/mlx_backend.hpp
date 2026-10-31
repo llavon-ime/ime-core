@@ -39,7 +39,10 @@ public:
     void clear() noexcept override;
     bool rewind(std::size_t position) override;
     void decode(std::span<const int> tokens, std::size_t position) override;
+    void decode_with_logits(
+        std::span<const int> tokens, std::size_t position, std::size_t logits_from) override;
     std::span<const float> logits() const override;
+    std::span<const float> logits_at(std::size_t row) const override;
 
 private:
     class Impl;

@@ -4,7 +4,10 @@
 
 #include <ime-core/logger.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -16,6 +19,7 @@
 namespace {
 using namespace llavon::ime::core;
 using namespace llavon::ime::core::internal;
+using TestPaddingEntry = llavon::ime::core::internal::PaddingEntry;
 
 class QuietLogger final : public Logger {
 public:
@@ -27,13 +31,14 @@ public:
 class FakeBackend;
 
 struct FakeModel final : BackendModel {
-    struct Decode { std::size_t position; std::vector<int> tokens; };
+    struct Decode { std::size_t position; std::vector<int> tokens; std::size_t logits_from; };
     std::vector<Decode> calls;
     std::vector<std::size_t> rewinds;
     int clears = 0;
     int warmups = 0;
     bool fail_decode = false;
     bool reject_rewind = false;
+    std::function<void(std::span<const int>, std::span<float>)> score;
     InferenceRuntimeInfo runtime;
     const InferenceRuntimeInfo& runtime_info() const noexcept override { return runtime; }
     std::size_t vocabulary_size() const noexcept override { return 65536; }
@@ -43,31 +48,54 @@ struct FakeModel final : BackendModel {
 class FakeBackend final : public BackendSession {
 public:
     explicit FakeBackend(std::shared_ptr<FakeModel> model) : model_(std::move(model)) {
-        values_.resize(model_->vocabulary_size());
         const Tokenizer tokenizer(IME_CORE_TEST_TABLES_DIR);
-        values_.at(static_cast<std::size_t>(tokenizer.map_char(U'你'))) = 10;
-        values_.at(static_cast<std::size_t>(tokenizer.map_char(U'好'))) = 9;
+        ni_ = static_cast<std::size_t>(tokenizer.map_char(U'你'));
+        hao_ = static_cast<std::size_t>(tokenizer.map_char(U'好'));
     }
     void ready() override { ++model_->warmups; }
-    void clear() noexcept override { ++model_->clears; offset_ = 0; }
+    void clear() noexcept override { ++model_->clears; prefix_.clear(); values_.clear(); }
     bool rewind(std::size_t position) override {
         model_->rewinds.push_back(position);
         if (model_->reject_rewind) return false;
-        if (position > offset_) throw std::logic_error("rewind exceeds cache");
-        offset_ = position;
+        if (position > prefix_.size()) throw std::logic_error("rewind exceeds cache");
+        prefix_.resize(position);
+        values_.clear();
         return true;
     }
     void decode(std::span<const int> tokens, std::size_t position) override {
-        if (position != offset_) throw std::logic_error("incorrect cache position");
-        model_->calls.push_back({position, {tokens.begin(), tokens.end()}});
-        offset_ += tokens.size();
+        decode_with_logits(tokens, position, tokens.empty() ? 0 : tokens.size() - 1);
+    }
+    void decode_with_logits(
+        std::span<const int> tokens, std::size_t position, std::size_t logits_from) override {
+        if (position != prefix_.size()) throw std::logic_error("incorrect cache position");
+        if (tokens.empty() || logits_from >= tokens.size()) throw std::invalid_argument("invalid logits extent");
+        model_->calls.push_back({position, {tokens.begin(), tokens.end()}, logits_from});
+        const auto vocabulary = model_->vocabulary_size();
+        values_.assign((tokens.size() - logits_from) * vocabulary, 0);
+        for (std::size_t index = 0; index < tokens.size(); ++index) {
+            prefix_.push_back(tokens[index]);
+            if (index < logits_from) continue;
+            auto row = std::span(values_).subspan((index - logits_from) * vocabulary, vocabulary);
+            row[ni_] = 10;
+            row[hao_] = 9;
+            if (model_->score) model_->score(prefix_, row);
+        }
         if (std::exchange(model_->fail_decode, false)) throw std::runtime_error("partial decode failure");
     }
-    std::span<const float> logits() const override { return values_; }
+    std::span<const float> logits() const override {
+        if (values_.empty()) throw std::logic_error("missing logits");
+        return std::span(values_).last(model_->vocabulary_size());
+    }
+    std::span<const float> logits_at(std::size_t row) const override {
+        if (row >= values_.size() / model_->vocabulary_size()) throw std::out_of_range("invalid logits row");
+        return std::span(values_).subspan(row * model_->vocabulary_size(), model_->vocabulary_size());
+    }
 private:
     std::shared_ptr<FakeModel> model_;
     std::vector<float> values_;
-    std::size_t offset_ = 0;
+    std::vector<int> prefix_;
+    std::size_t ni_ = 0;
+    std::size_t hao_ = 0;
 };
 
 std::unique_ptr<BackendSession> FakeModel::create_session() {
@@ -77,6 +105,160 @@ std::unique_ptr<BackendSession> FakeModel::create_session() {
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+void require_equal(const std::vector<PredictResult>& actual, const std::vector<PredictResult>& expected) {
+    require(actual.size() == expected.size(), "prediction count differs from AR");
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        require(actual[index].candidates == expected[index].candidates,
+            "candidate order or probabilities differ from AR");
+    }
+}
+
+struct PredictionFixture {
+    std::shared_ptr<Tokenizer> tokenizer = std::make_shared<Tokenizer>(IME_CORE_TEST_TABLES_DIR);
+    std::shared_ptr<HanziMapEngine> family = std::make_shared<HanziMapEngine>(IME_CORE_TEST_TABLES_DIR);
+    std::shared_ptr<QuietLogger> logger = std::make_shared<QuietLogger>();
+    std::shared_ptr<FakeModel> model = std::make_shared<FakeModel>();
+    PredictionEngine engine{model->create_session(), tokenizer, family, logger};
+
+    std::vector<PredictResult> reference(
+        const std::u16string& context, const std::vector<TestPaddingEntry>& padding) const {
+        const auto reference_model = std::make_shared<FakeModel>();
+        reference_model->score = model->score;
+        // A fresh engine has no draft and follows the ordinary AR path.
+        PredictionEngine reference_engine(reference_model->create_session(), tokenizer, family, logger);
+        return reference_engine.predict(context, padding);
+    }
+};
+
+void test_speculative_acceptance() {
+    PredictionFixture fixture;
+    std::vector<TestPaddingEntry> padding;
+    for (std::size_t count = 1; count <= 8; ++count) {
+        padding.push_back({false, 0, count % 2 == 0 ? u"ㄏㄠˇ" : u"ㄋㄧˇ"});
+        const auto before = fixture.model->calls.size();
+        require_equal(fixture.engine.predict(u"前文", padding), fixture.reference(u"前文", padding));
+        require(fixture.model->calls.size() == before + 1, "accepted draft used multiple decodes");
+        if (count > 1) {
+            const auto& call = fixture.model->calls.back();
+            require(call.logits_from == 1 && call.tokens.size() == count + 1,
+                "append did not fuse the new reading, SEP and draft");
+        }
+    }
+    const auto before = fixture.model->calls.size();
+    require_equal(fixture.engine.predict(u"前文", padding), fixture.reference(u"前文", padding));
+    require(fixture.model->calls.size() == before + 1 && fixture.model->calls.back().logits_from == 0,
+        "unchanged prompt did not refresh verification rows");
+
+    padding[1].bpmf = u"ㄋㄧˇ";
+    const auto before_edit = fixture.model->calls.size();
+    require_equal(fixture.engine.predict(u"前文", padding), fixture.reference(u"前文", padding));
+    const auto& batch = fixture.model->calls[before_edit];
+    require(batch.tokens.size() - batch.logits_from == 2,
+        "draft outside the edited candidate set was fed to the model");
+}
+
+void test_speculative_rejection(bool reject_rewind) {
+    // Row values depend on every input token, so retaining any row after a
+    // rejected draft token changes probabilities even if its top-1 agrees.
+    for (std::size_t mismatch = 0; mismatch < 4; ++mismatch) {
+        PredictionFixture fixture;
+        const auto mask = fixture.family->lookup_all(u"ㄋㄧˇ");
+        std::vector<int> tokens;
+        for (const auto character : mask) {
+            if (const auto token = fixture.tokenizer->map_char(character); token >= 0) tokens.push_back(token);
+        }
+        require(tokens.size() >= 2, "rejection fixture requires two candidates");
+        const auto sep = fixture.tokenizer->tokenize(u"", {}).back();
+        std::size_t flip_at = 5;
+        fixture.model->score = [tokens, sep, &flip_at](std::span<const int> prefix, std::span<float> logits) {
+            std::ranges::fill(logits, 0.0F);
+            std::uint32_t hash = 17;
+            for (const auto token : prefix) hash = hash * 31 + static_cast<std::uint32_t>(token);
+            const auto separator = std::ranges::find(prefix, sep);
+            const auto step = static_cast<std::size_t>(prefix.end() - separator - 1);
+            for (const auto token : tokens) {
+                logits[static_cast<std::size_t>(token)] =
+                    static_cast<float>((hash ^ static_cast<std::uint32_t>(token)) % 31) / 32.0F;
+            }
+            const auto preferred = tokens[step == flip_at ? 1 : 0];
+            logits[static_cast<std::size_t>(preferred)] += 5.0F;
+        };
+        const std::vector<TestPaddingEntry> padding(5, {false, 0, u"ㄋㄧˇ"});
+        (void)fixture.engine.predict(u"", padding);
+        flip_at = mismatch;
+        fixture.model->reject_rewind = reject_rewind;
+        const auto before = fixture.model->calls.size();
+        require_equal(fixture.engine.predict(u"", padding), fixture.reference(u"", padding));
+        const auto prompt_size = fixture.tokenizer->tokenize(u"", padding).size();
+        require(fixture.model->rewinds.back() == prompt_size + mismatch,
+            "rejected draft was rewound to the wrong position");
+        require(fixture.model->calls.size() - before == 5 - mismatch + (reject_rewind ? 1 : 0),
+            "rejection did not use one verification batch followed by AR");
+        fixture.model->reject_rewind = false;
+        const auto before_repeat = fixture.model->calls.size();
+        require_equal(fixture.engine.predict(u"", padding), fixture.reference(u"", padding));
+        require(fixture.model->calls.size() == before_repeat + 1,
+            "rejection left stale draft or KV state");
+    }
+}
+
+void test_speculative_edits_and_failures() {
+    PredictionFixture fixture;
+    fixture.model->score = [](std::span<const int> prefix, std::span<float> logits) {
+        std::uint32_t hash = 17;
+        for (const auto token : prefix) hash = hash * 31 + static_cast<std::uint32_t>(token);
+        for (std::size_t token = 0; token < logits.size(); ++token) {
+            const auto mixed = hash ^ (static_cast<std::uint32_t>(token) * 2654435761U);
+            logits[token] = static_cast<float>(mixed % 1021) / 128.0F;
+        }
+    };
+    const std::vector<std::vector<TestPaddingEntry>> requests{
+        {{false, 0, u"ㄋㄧˇ"}, {true, U'好', {}}, {false, 0, u"ㄟ "},
+            {true, U'\U0010ffff', {}}, {false, 0, u"ㄋㄧˇ"}, {true, U'好', {}}},
+        {{false, 0, u"ㄋㄧˇ"}, {true, U'好', {}}, {false, 0, u"ㄟ "},
+            {true, U'\U0010ffff', {}}, {false, 0, u"ㄋㄧˇ"}, {false, 0, u"ㄏㄠˇ"}},
+        {{true, U'好', {}}, {false, 0, u"ㄋㄧˇ"}, {false, 0, u"ㄏㄠˇ"}},
+        {{false, 0, u"ㄋㄧˇ"}, {false, 0, u"ㄏㄠˇ"}},
+        {}, {{true, U'好', {}}}, {{false, 0, u"ㄟ "}},
+        {{false, 0, u"ㄋㄧˇ"}, {false, 0, u"ㄏㄠˇ"}, {false, 0, u"ㄋㄧˇ"}},
+    };
+    for (const auto& padding : requests) {
+        for (const auto& context : {u"前文", u"修改"}) {
+            require_equal(fixture.engine.predict(context, padding), fixture.reference(context, padding));
+            require_equal(fixture.engine.predict(context, padding), fixture.reference(context, padding));
+        }
+    }
+
+    const std::u16string context(180, u'前');
+    fixture.engine.prefill(context);
+    require_equal(fixture.engine.predict(context, requests.front()), fixture.reference(context, requests.front()));
+    fixture.engine.prefill(context + u"文");
+    require_equal(fixture.engine.predict(context + u"文", requests[1]), fixture.reference(context + u"文", requests[1]));
+
+    const auto& padding = requests.back();
+    (void)fixture.engine.predict(u"修改", padding);
+    fixture.model->fail_decode = true;
+    bool failed = false;
+    try { (void)fixture.engine.predict(u"修改", padding); }
+    catch (const std::runtime_error&) { failed = true; }
+    require(failed, "failed verification was swallowed");
+    const auto before = fixture.model->calls.size();
+    require_equal(fixture.engine.predict(u"修改", padding), fixture.reference(u"修改", padding));
+    require(fixture.model->calls.size() == before + padding.size() &&
+        fixture.model->calls[before].position == 0, "failed verification retained its draft or cache");
+
+    fixture.model->score = [](std::span<const int>, std::span<float> logits) {
+        std::ranges::fill(logits, 0.0F);
+    };
+    const auto tied = fixture.engine.predict(u"", padding);
+    require_equal(tied, fixture.reference(u"", padding));
+    for (const auto& result : tied) {
+        require(std::ranges::is_sorted(result.candidates, {}, [&](const auto& candidate) {
+            return fixture.tokenizer->map_char(candidate.first);
+        }), "tied probabilities were not ordered by token ID");
+    }
 }
 
 void test() {
@@ -99,7 +281,9 @@ void test() {
 
     (void)engine.predict(u"", pair);
     require(model->rewinds.back() == prompt.size() - 1 &&
-        model->calls[2].tokens == std::vector<int>{prompt.back()}, "shortened cache did not refresh SEP logits");
+        model->calls.size() == 3 && model->calls[2].logits_from == 0 &&
+        model->calls[2].tokens == std::vector<int>{prompt.back(), tokenizer->map_char(U'你')},
+        "repeat did not verify the draft with SEP in one decode");
     const std::vector<llavon::ime::core::internal::PaddingEntry> singleton{{false, 0, u"ㄋㄧˇ"}};
     (void)engine.predict(u"", singleton);
     const auto unchanged = model->calls.size();
@@ -200,7 +384,11 @@ int main() {
     try {
         test();
         test_window();
-        std::cout << "[ok] prediction/cache/alias/window policies\n";
+        test_speculative_acceptance();
+        test_speculative_rejection(false);
+        test_speculative_rejection(true);
+        test_speculative_edits_and_failures();
+        std::cout << "[ok] prediction/cache/alias/window/speculative verification policies\n";
         return EXIT_SUCCESS;
     }
     catch (const std::exception& error) { std::cerr << "[FAIL] " << error.what() << '\n'; return EXIT_FAILURE; }

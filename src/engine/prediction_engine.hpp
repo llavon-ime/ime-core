@@ -43,10 +43,11 @@ private:
     void reset() noexcept;
     std::size_t select_window(std::span<const int> context) const;
     std::size_t boundary_cut(std::span<const int> context) const;
-    void align_cache(const std::vector<int>& prompt);
+    void align_cache(const std::vector<int>& prompt, std::span<const int> draft = {});
+    void rewind_cache(std::size_t position);
     void decode(std::span<const int> tokens);
-    std::vector<std::pair<int, float>> masked_predict(
-        std::span<const int> candidates) const;
+    static std::vector<std::pair<int, float>> masked_predict(
+        std::span<const int> candidates, std::span<const float> logits);
 
     std::unique_ptr<BackendSession> backend_;
     std::shared_ptr<const Tokenizer> tokenizer_;
@@ -54,6 +55,8 @@ private:
     std::shared_ptr<Logger> logger_;
     std::vector<int> cached_;
     std::vector<int> window_;
+    // Indexed by padding position, including skipped entries (-1).
+    std::vector<int> draft_;
     Clock::time_point last_touch_ = Clock::time_point::min();
 };
 

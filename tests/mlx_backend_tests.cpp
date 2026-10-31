@@ -1,4 +1,5 @@
 #include "bopomofo/bopomofo.hpp"
+#include "backend_logits_tests.hpp"
 #include "engine/llama_backend.hpp"
 #include "engine/mlx_backend.hpp"
 #include "engine/prediction_engine.hpp"
@@ -126,6 +127,7 @@ void run(const Fixture& fixture, bool gpu) {
     const auto paths = std::make_shared<CorePaths>(fixture.path, IME_CORE_TEST_TABLES_DIR,
         std::filesystem::path{}, 64, 2, gpu ? -2 : 0);
     const auto model = std::make_shared<MlxModel>(paths);
+    tests::verify_batch_logits(*model, 0.015F);
     require(model->vocabulary_size() == 18546, "vocabulary rows changed");
     require(model->runtime_info().gpu_offload == gpu, "unexpected inference device");
     MlxBackend full(model), incremental(model), other(model);

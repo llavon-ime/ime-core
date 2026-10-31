@@ -104,6 +104,7 @@ std::vector<PredictResult> PredictionEngine::predict(
 
     std::vector<Prepared> prepared(padding.size());
     bool needs_logits = false;
+    std::size_t last_prediction = 0;
     for (std::size_t index = 0; index < padding.size(); ++index) {
         auto& entry = prepared[index];
         if (padding[index].is_chosen) {
@@ -118,38 +119,91 @@ std::vector<PredictResult> PredictionEngine::predict(
             entry.tokens.push_back(token);
             entry.characters.emplace(token, character);
         }
-        needs_logits = needs_logits || !entry.tokens.empty();
+        if (!entry.tokens.empty()) {
+            needs_logits = true;
+            last_prediction = index;
+        }
     }
 
     std::vector<PredictResult> results(padding.size());
     if (!needs_logits) {
+        draft_.clear();
         return results;
     }
 
+    // Only feed the contiguous, valid draft prefix. The last prediction's
+    // token is never needed as input, matching the ordinary AR cache layout.
+    std::vector<int> continuation;
+    continuation.reserve(last_prediction);
+    bool has_draft = false;
+    for (std::size_t index = 0; index < last_prediction; ++index) {
+        const auto& entry = prepared[index];
+        if (padding[index].is_chosen) {
+            if (entry.chosen >= 0) continuation.push_back(entry.chosen);
+        } else if (!entry.tokens.empty()) {
+            if (index >= draft_.size() ||
+                std::ranges::find(entry.tokens, draft_[index]) == entry.tokens.end()) {
+                break;
+            }
+            continuation.push_back(draft_[index]);
+            has_draft = true;
+        }
+    }
+    if (!has_draft) continuation.clear();
+
+    std::vector<int> next_draft(padding.size(), -1);
+    std::size_t accepted = 0;
+    std::size_t ar_predictions = 0;
     try {
-        align_cache(prompt);
+        align_cache(prompt, continuation);
+        bool verifying = !continuation.empty();
+        std::size_t row = 0;
         std::vector<int> pending;
         pending.reserve(padding.size());
         for (std::size_t index = 0; index < padding.size(); ++index) {
             const auto& entry = prepared[index];
             if (padding[index].is_chosen) {
+                next_draft[index] = entry.chosen;
                 if (entry.chosen >= 0) {
-                    pending.push_back(entry.chosen);
+                    if (verifying) {
+                        ++row;
+                        ++accepted;
+                    } else {
+                        pending.push_back(entry.chosen);
+                    }
                 }
                 continue;
             }
             if (entry.tokens.empty()) {
                 continue;
             }
-            decode(pending);
-            pending.clear();
-            const auto probabilities = masked_predict(entry.tokens);
+            if (!verifying) {
+                decode(pending);
+                pending.clear();
+                ++ar_predictions;
+            }
+            const auto probabilities = masked_predict(
+                entry.tokens, verifying ? backend_->logits_at(row) : backend_->logits());
             for (const auto& [token, probability] : probabilities) {
                 results[index].candidates.emplace_back(
                     entry.characters.at(token), probability);
             }
-            pending.push_back(probabilities.front().first);
+            const auto prediction = probabilities.front().first;
+            next_draft[index] = prediction;
+            if (verifying && row < continuation.size() && prediction == continuation[row]) {
+                ++row;
+                ++accepted;
+            } else {
+                if (verifying && row < continuation.size()) {
+                    // The current row has the correct prefix. Discard the
+                    // wrong draft token and every KV entry depending on it.
+                    rewind_cache(prompt.size() + row);
+                }
+                verifying = false;
+                pending.push_back(prediction);
+            }
         }
+        draft_ = std::move(next_draft);
     } catch (...) {
         reset();
         throw;
@@ -159,7 +213,8 @@ std::vector<PredictResult> PredictionEngine::predict(
         Clock::now() - start).count();
     logger_->log(
         LogInformation::general,
-        std::format("[TIME] predict_ms={:.3f}", elapsed));
+        std::format("[TIME] predict_ms={:.3f} draft_tokens={} accepted_tokens={} ar_predictions={}",
+            elapsed, continuation.size(), accepted, ar_predictions));
     return results;
 }
 
@@ -172,6 +227,7 @@ std::vector<int> PredictionEngine::window_prompt() const {
 void PredictionEngine::reset() noexcept {
     cached_.clear();
     window_.clear();
+    draft_.clear();
     backend_->clear();
 }
 
@@ -205,13 +261,13 @@ std::size_t PredictionEngine::boundary_cut(std::span<const int> context) const {
     return first + static_cast<std::size_t>(boundary - candidates.begin()) + 1;
 }
 
-void PredictionEngine::align_cache(const std::vector<int>& prompt) {
+void PredictionEngine::align_cache(const std::vector<int>& prompt, std::span<const int> draft) {
     std::size_t common = 0;
     while (common < cached_.size() && common < prompt.size() &&
            cached_[common] == prompt[common]) {
         ++common;
     }
-    if (common == prompt.size() && common < cached_.size() && common > 0) {
+    if (common == prompt.size() && (common < cached_.size() || !draft.empty()) && common > 0) {
         --common;
     }
     if (common < cached_.size()) {
@@ -221,7 +277,29 @@ void PredictionEngine::align_cache(const std::vector<int>& prompt) {
         }
         cached_.resize(common);
     }
-    decode(std::span(prompt).subspan(common));
+    if (draft.empty()) {
+        decode(std::span(prompt).subspan(common));
+        return;
+    }
+    std::vector<int> feed(prompt.begin() + static_cast<std::ptrdiff_t>(common), prompt.end());
+    feed.insert(feed.end(), draft.begin(), draft.end());
+    // Recompute SEP even for an unchanged prompt. Earlier prompt rows need no
+    // output head; requested row zero must predict the first output token.
+    backend_->decode_with_logits(feed, common, prompt.size() - common - 1);
+    cached_.insert(cached_.end(), feed.begin(), feed.end());
+    last_touch_ = Clock::now();
+}
+
+void PredictionEngine::rewind_cache(std::size_t position) {
+    if (backend_->rewind(position)) {
+        cached_.resize(position);
+        return;
+    }
+    // Backends may reject a partial rewind. Rebuild only the accepted prefix.
+    const std::vector<int> prefix(cached_.begin(), cached_.begin() + static_cast<std::ptrdiff_t>(position));
+    backend_->clear();
+    cached_.clear();
+    decode(prefix);
 }
 
 void PredictionEngine::decode(std::span<const int> tokens) {
@@ -234,8 +312,7 @@ void PredictionEngine::decode(std::span<const int> tokens) {
 }
 
 std::vector<std::pair<int, float>> PredictionEngine::masked_predict(
-    std::span<const int> candidates) const {
-    const auto logits = backend_->logits();
+    std::span<const int> candidates, std::span<const float> logits) {
     float maximum = -INFINITY;
     for (const int token : candidates) {
         if (token < 0 || static_cast<std::size_t>(token) >= logits.size()) {
@@ -265,7 +342,8 @@ std::vector<std::pair<int, float>> PredictionEngine::masked_predict(
         probabilities.begin(),
         probabilities.end(),
         [](const auto& left, const auto& right) {
-            return left.second > right.second;
+            if (left.second != right.second) return left.second > right.second;
+            return left.first < right.first;
         });
     return probabilities;
 }

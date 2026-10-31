@@ -192,7 +192,8 @@ public:
     mx::array forward(
         std::span<const int> tokens,
         int position,
-        std::vector<LayerCache>& cache) const {
+        std::vector<LayerCache>& cache,
+        std::size_t logits_from) const {
         const int count = static_cast<int>(tokens.size());
         const mx::array indices(tokens.data(), {1, count}, mx::int32);
         auto hidden = mx::take(weights_.at("token_embd.weight"), indices, 0, stream_);
@@ -210,13 +211,14 @@ public:
 
         hidden = mx::slice(
             hidden,
-            {0, count - 1, 0},
+            {0, static_cast<int>(logits_from), 0},
             {1, count, shape_.hidden},
             stream_);
         hidden = mx::fast::rms_norm(
             hidden, weights_.at("output_norm.weight"), epsilon_, stream_);
         return mx::astype(
-            mx::reshape(linear(hidden, "output.weight"), {shape_.vocabulary}, stream_),
+            mx::reshape(linear(hidden, "output.weight"),
+                {count - static_cast<int>(logits_from), shape_.vocabulary}, stream_),
             mx::float32,
             stream_);
     }
@@ -554,10 +556,11 @@ public:
         return true;
     }
 
-    void decode(std::span<const int> tokens, std::size_t position) {
+    void decode_with_logits(
+        std::span<const int> tokens, std::size_t position, std::size_t logits_from) {
         const auto& model = *model_->impl_;
         const auto capacity = static_cast<std::size_t>(model.capacity());
-        if (tokens.empty() || position != offset_ || position > capacity ||
+        if (tokens.empty() || logits_from >= tokens.size() || position != offset_ || position > capacity ||
             tokens.size() > capacity - position) {
             throw std::invalid_argument("invalid MLX decode extent");
         }
@@ -569,7 +572,7 @@ public:
 
         auto next_cache = cache_;
         const auto next_logits = model.forward(
-            tokens, static_cast<int>(position), next_cache);
+            tokens, static_cast<int>(position), next_cache, logits_from);
         std::vector<mx::array> pending{next_logits};
         pending.reserve(1 + next_cache.size() * 2);
         for (const auto& entry : next_cache) {
@@ -579,7 +582,7 @@ public:
         mx::eval(pending);
 
         const auto* data = next_logits.data<float>();
-        logits_.assign(data, data + model.vocabulary_size());
+        logits_.assign(data, data + (tokens.size() - logits_from) * model.vocabulary_size());
         cache_ = std::move(next_cache);
         offset_ += tokens.size();
     }
@@ -588,7 +591,15 @@ public:
         if (logits_.empty()) {
             throw std::runtime_error("MLX returned no logits");
         }
-        return logits_;
+        return std::span(logits_).last(model_->vocabulary_size());
+    }
+
+    std::span<const float> logits_at(std::size_t row) const {
+        const auto vocabulary = model_->vocabulary_size();
+        if (row >= logits_.size() / vocabulary) {
+            throw std::out_of_range("MLX logits row exceeds output");
+        }
+        return std::span(logits_).subspan(row * vocabulary, vocabulary);
     }
 
     void ready() const {
@@ -596,7 +607,7 @@ public:
         std::vector<LayerCache> scratch(
             static_cast<std::size_t>(model.layer_count()));
         const int token = model.bos_token();
-        mx::eval(model.forward(std::span(&token, 1), 0, scratch));
+        mx::eval(model.forward(std::span(&token, 1), 0, scratch, 0));
     }
 
 private:
@@ -670,13 +681,23 @@ bool MlxBackend::rewind(std::size_t position) {
 }
 
 void MlxBackend::decode(std::span<const int> tokens, std::size_t position) {
+    decode_with_logits(tokens, position, tokens.empty() ? 0 : tokens.size() - 1);
+}
+
+void MlxBackend::decode_with_logits(
+    std::span<const int> tokens, std::size_t position, std::size_t logits_from) {
     const std::lock_guard lock(executor_mutex());
-    impl_->decode(tokens, position);
+    impl_->decode_with_logits(tokens, position, logits_from);
 }
 
 std::span<const float> MlxBackend::logits() const {
     const std::lock_guard lock(executor_mutex());
     return impl_->logits();
+}
+
+std::span<const float> MlxBackend::logits_at(std::size_t row) const {
+    const std::lock_guard lock(executor_mutex());
+    return impl_->logits_at(row);
 }
 
 void MlxBackend::ready() {

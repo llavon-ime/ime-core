@@ -177,11 +177,13 @@ public:
     }
 
     void decode(llama_context* context, std::span<const int> tokens, std::size_t position,
-                llama_seq_id sequence) const {
+                llama_seq_id sequence, std::optional<std::size_t> logits_from = std::nullopt) const {
         const auto limit = static_cast<std::size_t>(llama_n_ctx_seq(context));
         if (tokens.empty() || position > limit || tokens.size() > limit - position ||
             tokens.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
             throw std::invalid_argument("invalid llama decode extent");
+        const auto first_output = logits_from.value_or(tokens.size() - 1);
+        if (first_output >= tokens.size()) throw std::invalid_argument("invalid llama logits extent");
         for (const int token : tokens)
             if (token < 0 || static_cast<std::size_t>(token) >= vocabulary_size())
                 throw std::invalid_argument("llama decode token exceeds vocabulary");
@@ -198,7 +200,8 @@ public:
         b.n_tokens = static_cast<std::int32_t>(tokens.size());
         for (std::size_t i = 0; i < tokens.size(); ++i) {
             b.token[i] = tokens[i]; b.pos[i] = static_cast<llama_pos>(position + i);
-            b.n_seq_id[i] = 1; b.seq_id[i][0] = sequence; b.logits[i] = static_cast<std::int8_t>(i + 1 == tokens.size());
+            b.n_seq_id[i] = 1; b.seq_id[i][0] = sequence;
+            b.logits[i] = static_cast<std::int8_t>(i >= first_output);
         }
         const int result = llama_decode(context, b);
         llama_synchronize(context);
@@ -334,23 +337,38 @@ public:
     }
     bool rewind(std::size_t position) override {
         if (position > static_cast<std::size_t>(std::numeric_limits<llama_pos>::max())) return false;
+        logits_.clear();
         return context_->with([&](llama_context* context) {
             return llama_memory_seq_rm(llama_get_memory(context), sequence_, static_cast<llama_pos>(position), -1);
         });
     }
     void ready() override { model_->warm_up(); }
     void decode(std::span<const int> tokens, std::size_t position) override {
+        decode_with_logits(tokens, position, tokens.empty() ? 0 : tokens.size() - 1);
+    }
+    void decode_with_logits(
+        std::span<const int> tokens, std::size_t position, std::size_t logits_from) override {
         logits_.clear();
         context_->with([&](llama_context* context) {
-            model_->decode(context, tokens, position, sequence_);
-            const auto* values = llama_get_logits_ith(context, -1);
-            if (!values) throw std::runtime_error("llama returned no logits");
-            logits_.assign(values, values + model_->vocabulary_size());
+            model_->decode(context, tokens, position, sequence_, logits_from);
+            const auto vocabulary = model_->vocabulary_size();
+            logits_.resize((tokens.size() - logits_from) * vocabulary);
+            // Copy every requested row while the shared context is locked.
+            for (std::size_t index = logits_from; index < tokens.size(); ++index) {
+                const auto* values = llama_get_logits_ith(context, static_cast<std::int32_t>(index));
+                if (!values) throw std::runtime_error("llama returned no logits");
+                std::copy_n(values, vocabulary, logits_.data() + (index - logits_from) * vocabulary);
+            }
         });
     }
     std::span<const float> logits() const override {
         if (logits_.empty()) throw std::runtime_error("llama returned no logits");
-        return logits_;
+        return std::span(logits_).last(model_->vocabulary_size());
+    }
+    std::span<const float> logits_at(std::size_t row) const override {
+        const auto vocabulary = model_->vocabulary_size();
+        if (row >= logits_.size() / vocabulary) throw std::out_of_range("llama logits row exceeds output");
+        return std::span(logits_).subspan(row * vocabulary, vocabulary);
     }
 
 private:

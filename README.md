@@ -89,6 +89,22 @@ KV 快取，完成後清除這些合成狀態，並把預熱好的 context 交�
 並在預熱完成後立即儲存，之後啟動即可重複使用。後端不支援這項選用擴充時，核心仍可正常運作，
 只是沒有快取。固定使用的 ggml fork 請參考 [vcpkg-ports/README.md](vcpkg-ports/README.md)。
 
+## 草稿批次驗證
+
+每個 session 會保留上一輪的 top-1 token 作為下一輪草稿。草稿仍在本輪候選集合內時，
+核心會將尚未快取的 prompt 尾段、SEP 和草稿合成一次 decode，並從左到右重新計算每個位置的
+完整候選機率。第一個不一致的位置保留本輪預測，丟棄其後的草稿 KV，剩餘位置改用逐字 AR。
+每輪最多嘗試一次批次驗證；沒有可用草稿時沿用逐字 AR。手動選字與空候選的位置維持原有規則。
+
+此流程在精確算術下與逐字 AR 等價；實際 backend 的批次與單 token kernel 可能產生數值差異。
+候選機率相同時，以 token ID 遞增排序。decode 失敗會清除草稿與 KV，rewind 不支援時則重建
+已接受的前綴。此功能不需要額外的草稿模型。
+
+`[TIME] predict_ms=...` 記錄另外包含 `draft_tokens`（實際餵入的草稿 token 數，含固定字）、
+`accepted_tokens`（接受的草稿 token 數，含固定字）和 `ar_predictions`（逐字 AR 計算的位置數）。
+批次最後一行產生的額外預測不計入草稿接受數。加速幅度取決於草稿接受率、輸入長度與 backend，
+應以實際的 `predict_ms` 比較。
+
 ## 建置
 
 需要 CMake 3.24 以上、支援 C++23 的編譯器，以及 vcpkg（相依套件列於 `vcpkg.json`）。
@@ -109,7 +125,11 @@ cmake --install build/<preset> --config Release
 | --- | --- |
 | `IME_CORE_BUILD_TESTS` | 建置單元測試，之後以 `ctest` 執行 |
 | `IME_CORE_BUILD_TOOLS` | 建置需要實際模型的手動診斷工具 `ime-core-latency-check` |
-| `IME_CORE_TEST_MODEL` | 指定 GGUF 模型，額外執行 MLX 後端的模型一致性測試（需有 MLX，例如在 macOS 上） |
+| `IME_CORE_TEST_MODEL` | 指定 GGUF 模型，額外執行 llama.cpp 的逐行 logits、KV 回退及草稿驗證測試；有 MLX 時也會執行跨後端一致性測試 |
+
+指定模型後，也可手動執行 `ime-core-llama-backend-tests MODEL_PATH --gpu`，確認 GPU 後端的
+批次 logits 與逐字推論結果。測試會檢查不同 session 的 logits 隔離，以及 rewind 後的修正輸入；
+一般推論邏輯測試另使用前綴相關的假模型，要求完整候選排序與機率和逐字 AR 完全相同。
 
 ### 延遲檢查工具
 
