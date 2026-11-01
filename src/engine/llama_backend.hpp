@@ -86,6 +86,7 @@ public:
         if (!paths_) throw std::invalid_argument("llama model paths are required");
         initialize();
         auto params = llama_model_default_params();
+        params.use_mmap = false;
         std::array<ggml_backend_dev_t, 2> devices{};
         const auto& requested = paths_->inference_device();
         auto selected = requested.backend == InferenceBackend::cpu ? LlamaOffloadDevice{} : select_gpu(requested);
