@@ -159,20 +159,17 @@ void test_speculative_acceptance() {
         "draft outside the edited candidate set was fed to the model");
 }
 
-void test_speculative_rejection(bool reject_rewind) {
-    // Row values depend on every input token, so retaining any row after a
-    // rejected draft token changes probabilities even if its top-1 agrees.
-    for (std::size_t mismatch = 0; mismatch < 4; ++mismatch) {
-        PredictionFixture fixture;
-        const auto mask = fixture.family->lookup_all(u"ㄋㄧˇ");
-        std::vector<int> tokens;
-        for (const auto character : mask) {
-            if (const auto token = fixture.tokenizer->map_char(character); token >= 0) tokens.push_back(token);
+struct RejectionFixture : PredictionFixture {
+    std::vector<int> tokens;
+    std::vector<std::size_t> flips;
+
+    RejectionFixture() {
+        for (const auto character : family->lookup_all(u"ㄋㄧˇ")) {
+            if (const auto token = tokenizer->map_char(character); token >= 0) tokens.push_back(token);
         }
         require(tokens.size() >= 2, "rejection fixture requires two candidates");
-        const auto sep = fixture.tokenizer->tokenize(u"", {}).back();
-        std::size_t flip_at = 5;
-        fixture.model->score = [tokens, sep, &flip_at](std::span<const int> prefix, std::span<float> logits) {
+        const auto sep = tokenizer->tokenize(u"", {}).back();
+        model->score = [this, sep](std::span<const int> prefix, std::span<float> logits) {
             std::ranges::fill(logits, 0.0F);
             std::uint32_t hash = 17;
             for (const auto token : prefix) hash = hash * 31 + static_cast<std::uint32_t>(token);
@@ -182,26 +179,53 @@ void test_speculative_rejection(bool reject_rewind) {
                 logits[static_cast<std::size_t>(token)] =
                     static_cast<float>((hash ^ static_cast<std::uint32_t>(token)) % 31) / 32.0F;
             }
-            const auto preferred = tokens[step == flip_at ? 1 : 0];
+            const auto preferred = tokens[std::ranges::contains(flips, step) ? 1 : 0];
             logits[static_cast<std::size_t>(preferred)] += 5.0F;
         };
+    }
+};
+
+void test_speculative_rejection(bool reject_rewind) {
+    // Row values depend on every input token, so retaining any row after a
+    // rejected draft token changes probabilities even if its top-1 agrees.
+    for (std::size_t mismatch = 0; mismatch < 4; ++mismatch) {
+        RejectionFixture fixture;
         const std::vector<TestPaddingEntry> padding(5, {false, 0, u"ㄋㄧˇ"});
         (void)fixture.engine.predict(u"", padding);
-        flip_at = mismatch;
+        fixture.flips = {mismatch};
         fixture.model->reject_rewind = reject_rewind;
         const auto before = fixture.model->calls.size();
         require_equal(fixture.engine.predict(u"", padding), fixture.reference(u"", padding));
         const auto prompt_size = fixture.tokenizer->tokenize(u"", padding).size();
         require(fixture.model->rewinds.back() == prompt_size + mismatch,
             "rejected draft was rewound to the wrong position");
-        require(fixture.model->calls.size() - before == 5 - mismatch + (reject_rewind ? 1 : 0),
-            "rejection did not use one verification batch followed by AR");
+        require(fixture.model->calls.size() - before == 2 + (reject_rewind ? 1 : 0),
+            "rejection did not resubmit the remaining draft in one batch");
         fixture.model->reject_rewind = false;
         const auto before_repeat = fixture.model->calls.size();
         require_equal(fixture.engine.predict(u"", padding), fixture.reference(u"", padding));
         require(fixture.model->calls.size() == before_repeat + 1,
             "rejection left stale draft or KV state");
     }
+}
+
+void test_speculative_resubmission() {
+    RejectionFixture fixture;
+    const std::vector<TestPaddingEntry> padding(6, {false, 0, u"ㄋㄧˇ"});
+    (void)fixture.engine.predict(u"", padding);
+    fixture.flips = {0, 2, 3};
+    const auto before = fixture.model->calls.size();
+    const auto rewinds = fixture.model->rewinds.size();
+    require_equal(fixture.engine.predict(u"", padding), fixture.reference(u"", padding));
+    require(fixture.model->calls.size() - before == 4,
+        "each rejection did not resubmit the remaining draft");
+    const auto prompt_size = fixture.tokenizer->tokenize(u"", padding).size();
+    require(std::ranges::equal(std::span(fixture.model->rewinds).subspan(rewinds + 1),
+                std::vector{prompt_size, prompt_size + 2, prompt_size + 3}),
+        "resubmitted drafts were rewound to the wrong positions");
+    const auto& last = fixture.model->calls.back();
+    require(last.position == prompt_size + 3 && last.logits_from == 0 && last.tokens.size() == 2,
+        "row-zero rejection did not resubmit the following draft");
 }
 
 void test_speculative_edits_and_failures() {
@@ -387,6 +411,7 @@ int main() {
         test_speculative_acceptance();
         test_speculative_rejection(false);
         test_speculative_rejection(true);
+        test_speculative_resubmission();
         test_speculative_edits_and_failures();
         std::cout << "[ok] prediction/cache/alias/window/speculative verification policies\n";
         return EXIT_SUCCESS;

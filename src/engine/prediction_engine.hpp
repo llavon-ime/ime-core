@@ -44,6 +44,7 @@ private:
     std::size_t select_window(std::span<const int> context) const;
     std::size_t boundary_cut(std::span<const int> context) const;
     void align_cache(const std::vector<int>& prompt, std::span<const int> draft = {});
+    void decode_draft(std::span<const int> prefix, std::span<const int> draft);
     void rewind_cache(std::size_t position);
     void decode(std::span<const int> tokens);
     static std::vector<std::pair<int, float>> masked_predict(
