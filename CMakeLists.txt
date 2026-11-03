@@ -188,6 +188,15 @@ if(IME_CORE_BUILD_TESTS)
 
     set(IME_CORE_TEST_MODEL "" CACHE FILEPATH "GGUF model for native backend regression tests")
     if(IME_CORE_TEST_MODEL)
+        add_executable(ime-core-startup-tests tests/core_startup_tests.cpp)
+        target_compile_features(ime-core-startup-tests PRIVATE cxx_std_23)
+        set_target_properties(ime-core-startup-tests PROPERTIES CXX_EXTENSIONS NO)
+        target_compile_options(ime-core-startup-tests PRIVATE "$<TARGET_PROPERTY:ime-core,COMPILE_OPTIONS>")
+        target_link_libraries(ime-core-startup-tests PRIVATE ime-core::ime-core)
+        add_test(NAME ime-core-startup-tests COMMAND ime-core-startup-tests
+            "${IME_CORE_TEST_MODEL}" "${CMAKE_CURRENT_SOURCE_DIR}/table")
+        set_tests_properties(ime-core-startup-tests PROPERTIES TIMEOUT 120)
+
         add_executable(ime-core-llama-backend-tests tests/llama_backend_tests.cpp)
         target_compile_features(ime-core-llama-backend-tests PRIVATE cxx_std_23)
         set_target_properties(ime-core-llama-backend-tests PROPERTIES CXX_EXTENSIONS NO)

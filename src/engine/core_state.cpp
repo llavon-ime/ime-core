@@ -8,6 +8,7 @@
 #include <ime-core/logger.hpp>
 
 #include <cstdint>
+#include <future>
 #include <stdexcept>
 #include <utility>
 
@@ -26,9 +27,18 @@ CoreState::CoreState(CoreConfig config) : logger_(std::move(config.logger)) {
         config.gpu_layers,
         config.inference_device,
         config.sessions_per_context);
-    tokenizer_ = std::make_shared<Tokenizer>(*paths);
-    hanzi_map_ = std::make_shared<HanziMapEngine>(*paths);
+    // Table loading is independent of backend initialization and model preparation.
+    // Return owned results so a failure in either branch cannot leave background
+    // work accessing a partially constructed CoreState.
+    auto tables_loading = std::async(std::launch::async, [paths] {
+        return std::pair{
+            std::make_shared<Tokenizer>(*paths),
+            std::make_shared<HanziMapEngine>(*paths)};
+    });
     model_ = create_backend_model(config.inference_provider, paths);
+    auto [tokenizer, hanzi_map] = tables_loading.get();
+    tokenizer_ = std::move(tokenizer);
+    hanzi_map_ = std::move(hanzi_map);
     if (!tokenizer_->tokens_fit_vocabulary(
             static_cast<std::int64_t>(model_->vocabulary_size()))) {
         throw std::runtime_error("IME token tables exceed model vocabulary");
