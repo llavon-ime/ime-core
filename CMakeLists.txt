@@ -199,6 +199,14 @@ if(IME_CORE_BUILD_TESTS)
             ime-core::ime-core llama reflectcpp::reflectcpp ${IME_CORE_UTF8_TARGET})
         add_test(NAME ime-core-llama-backend-tests COMMAND ime-core-llama-backend-tests "${IME_CORE_TEST_MODEL}")
         set_tests_properties(ime-core-llama-backend-tests PROPERTIES TIMEOUT 120)
+        add_executable(ime-core-vulkan-prepare-tests tests/vulkan_pipeline_prepare_tests.cpp)
+        target_compile_features(ime-core-vulkan-prepare-tests PRIVATE cxx_std_23)
+        set_target_properties(ime-core-vulkan-prepare-tests PROPERTIES CXX_EXTENSIONS NO)
+        target_link_libraries(ime-core-vulkan-prepare-tests PRIVATE llama)
+        add_test(NAME ime-core-vulkan-prepare-tests COMMAND ime-core-vulkan-prepare-tests
+            "${IME_CORE_TEST_MODEL}" "${CMAKE_CURRENT_BINARY_DIR}/vulkan-prepare-cache")
+        set_tests_properties(ime-core-vulkan-prepare-tests PROPERTIES
+            TIMEOUT 120 SKIP_RETURN_CODE 77 LABELS "hardware;vulkan")
     endif()
 
     set(IME_CORE_MLX_TEST_ROOT "" CACHE PATH "Namespaced MLX SDK from MlxDependency.cmake for cross-backend tests")

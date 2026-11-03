@@ -3,17 +3,21 @@
 #include <llama.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <iostream>
 #include <stdexcept>
 #include <vector>
 
 namespace llavon::ime::core::internal {
 
-// Prepare Vulkan kernels that a one-token warmup does not cover.
-inline void prepare_vulkan_pipelines(llama_context* context, llama_token token) {
-    const auto capacity = std::min(llama_n_ctx_seq(context), llama_n_batch(context));
-    if (capacity == 0) throw std::runtime_error("invalid Vulkan warmup capacity");
-
+// Build representative graphs and prepare their pipelines on the host. No decode,
+// graph input upload, tensor evaluation, or KV-cache mutation takes place here.
+inline void prepare_vulkan_pipelines(llama_context* context) {
+    const auto capacity = std::min({llama_n_ctx_seq(context),
+                                   llama_n_batch(context), llama_n_ubatch(context)});
+    if (capacity == 0) throw std::runtime_error("invalid Vulkan preparation capacity");
+    const auto begin = std::chrono::steady_clock::now();
     std::vector<std::uint32_t> sizes;
     for (std::uint32_t size = 1; size <= std::min(capacity, 8u); ++size) {
         sizes.push_back(size);
@@ -24,48 +28,32 @@ inline void prepare_vulkan_pipelines(llama_context* context, llama_token token) 
     }
     if (sizes.back() != capacity) sizes.push_back(capacity);
 
-    struct Batch final {
-        llama_batch value;
-        explicit Batch(std::uint32_t count)
-            : value(llama_batch_init(static_cast<std::int32_t>(count), 0, 1)) {}
-        ~Batch() { llama_batch_free(value); }
-        Batch(const Batch&) = delete;
-        Batch& operator=(const Batch&) = delete;
-    };
-
-    const auto memory = llama_get_memory(context);
-    for (const bool populated : {false, true}) {
+    ggml_backend_graph_prepare_result total{};
+    std::uint32_t graphs = 0;
+    for (const bool full_kv : {false, true}) {
         for (const auto size : sizes) {
-            for (const auto outputs : {1u, size}) {
-                if (outputs == size && size == 1) continue;
-                const auto position = static_cast<llama_pos>(populated ? capacity - size : 0);
-                if (!populated) {
-                    llama_memory_clear(memory, true);
-                } else if (!llama_memory_seq_rm(memory, 0, position, -1)) {
-                    throw std::runtime_error("failed to reset Vulkan warmup cache");
+            for (unsigned variant = 0; variant < 2; ++variant) {
+                if (variant == 1 && size == 1) continue;
+                const auto outputs = variant == 0 ? 1u : size;
+                ggml_backend_graph_prepare_result result{};
+                const auto status = llama_prepare_pipelines(
+                    context, size, outputs, full_kv, true, &result);
+                if (status != GGML_STATUS_SUCCESS) {
+                    throw std::runtime_error("Vulkan host pipeline preparation failed");
                 }
-
-                Batch batch(size);
-                if (!batch.value.token || !batch.value.pos || !batch.value.n_seq_id ||
-                    !batch.value.seq_id || !batch.value.logits) {
-                    throw std::runtime_error("failed to allocate Vulkan warmup batch");
-                }
-                batch.value.n_tokens = static_cast<std::int32_t>(size);
-                const auto first_output = static_cast<std::int32_t>(size - outputs);
-                for (std::int32_t i = 0; i < batch.value.n_tokens; ++i) {
-                    batch.value.token[i] = token;
-                    batch.value.pos[i] = position + i;
-                    batch.value.n_seq_id[i] = 1;
-                    batch.value.seq_id[i][0] = 0;
-                    batch.value.logits[i] = i >= first_output;
-                }
-                const int status = llama_decode(context, batch.value);
-                llama_synchronize(context);
-                if (status != 0) throw std::runtime_error("Vulkan pipeline warmup failed");
+                total.cache_hits += result.cache_hits;
+                total.compile_required += result.compile_required;
+                total.unprobed += result.unprobed;
+                ++graphs;
             }
         }
     }
-    llama_memory_clear(memory, true);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - begin).count();
+    std::clog << "[CORE] Vulkan host preparation graphs=" << graphs
+              << " cache_hits=" << total.cache_hits
+              << " compile_required=" << total.compile_required
+              << " unprobed=" << total.unprobed << " ms=" << elapsed << '\n';
 }
 
 } // namespace llavon::ime::core::internal

@@ -127,7 +127,7 @@ public:
         if (offload && selected.backend == InferenceBackend::vulkan) {
             auto context = std::make_shared<LlamaSharedContext>(
                 new_context(0, 0, paths_->sessions_per_context()));
-            prepare_vulkan_pipelines(context->get(), warmup_token());
+            prepare_vulkan_pipelines(context->get());
             using Save = void (*)(ggml_backend_dev_t);
             const auto registry = ggml_backend_dev_backend_reg(selected.device);
             const auto save = reinterpret_cast<Save>(ggml_backend_reg_get_proc_address(

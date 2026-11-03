@@ -1,8 +1,8 @@
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO llavon-ime/ggml
-    REF 37c53792462c1845478010cae2d7b6d2ea3ea934
-    SHA512 5fbee942b0e7d1491a047a6f9e2e46f7d2a882009c14929c70e405f701c40902817eed399297a7a312bc2008d77d7327833df4b93502ca53ee0cff69d79146ca
+    REF 80b8081c627deee05ebcf377f64746b58b4b82c7
+    SHA512 dcbbcc2abd850fd036b6596635b50f748942a6329e1475526efc621d8a6c125c596d88d02e8f42bba0eea69bd24bdf0832c7de0efc48da8d4cf3ce4d7a100ead
     HEAD_REF feature/configurable-vulkan-pipeline-cache
 )
 
