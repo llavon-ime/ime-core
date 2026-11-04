@@ -159,6 +159,27 @@ void test_speculative_acceptance() {
         "draft outside the edited candidate set was fed to the model");
 }
 
+void test_draft_realignment() {
+    PredictionFixture fixture;
+    std::vector<TestPaddingEntry> padding;
+    for (std::size_t count = 0; count < 6; ++count) {
+        padding.push_back({false, 0, count % 2 == 0 ? u"ㄋㄧˇ" : u"ㄏㄠˇ"});
+    }
+    (void)fixture.engine.predict(u"前文", padding);
+
+    auto inserted = padding;
+    inserted.insert(inserted.begin() + 2, {false, 0, u"ㄏㄠˇ"});
+    auto before = fixture.model->calls.size();
+    require_equal(fixture.engine.predict(u"前文", inserted), fixture.reference(u"前文", inserted));
+    require(fixture.model->calls.size() == before + 2,
+        "middle insertion did not reuse the shifted draft");
+
+    before = fixture.model->calls.size();
+    require_equal(fixture.engine.predict(u"前文", padding), fixture.reference(u"前文", padding));
+    require(fixture.model->calls.size() == before + 1,
+        "middle deletion did not reuse the shifted draft");
+}
+
 struct RejectionFixture : PredictionFixture {
     std::vector<int> tokens;
     std::vector<std::size_t> flips;
@@ -330,15 +351,21 @@ void test() {
         "failed decode left reusable partial cache");
 
     const std::vector<llavon::ime::core::internal::PaddingEntry> chosen{{true, U'好', {}}, {false, 0, u"ㄋㄧˇ"}};
+    const auto chosen_prompt = tokenizer->tokenize(u"", chosen);
+    const auto before_chosen = model->calls.size();
     results = engine.predict(u"", chosen);
     require(results[0].candidates.empty() && results[1].candidates.front().first == U'你', "manual choice was replaced");
-    require(model->calls.back().tokens == std::vector<int>{tokenizer->map_char(U'好')}, "chosen token missing from continuation");
+    auto fused = std::vector<int>(chosen_prompt.begin() + 1, chosen_prompt.end());
+    fused.push_back(tokenizer->map_char(U'好'));
+    require(model->calls.size() == before_chosen + 1 && model->calls.back().tokens == fused &&
+        model->calls.back().logits_from == fused.size() - 2,
+        "chosen-only continuation was not fused with the prompt");
 
     const auto before_alias = model->calls.size();
     results = engine.predict(u"", {{false, 0, u"ㄟ "}});
     require(results.size() == 1 && results[0].candidates.empty() && model->calls.size() == before_alias,
         "token-only alias changed the original candidate family");
-    require(model->calls.back().tokens.size() == 1, "final prediction was unnecessarily decoded");
+    require(model->calls.back().tokens == fused, "final prediction was unnecessarily decoded");
 }
 
 std::u16string distinct_text(const Tokenizer& tokenizer, char32_t first, std::size_t length, std::size_t punctuation_every) {
@@ -409,6 +436,7 @@ int main() {
         test();
         test_window();
         test_speculative_acceptance();
+        test_draft_realignment();
         test_speculative_rejection(false);
         test_speculative_rejection(true);
         test_speculative_resubmission();

@@ -43,6 +43,7 @@ private:
     void reset() noexcept;
     std::size_t select_window(std::span<const int> context) const;
     std::size_t boundary_cut(std::span<const int> context) const;
+    std::vector<int> aligned_draft(const std::vector<PaddingEntry>& padding) const;
     void align_cache(const std::vector<int>& prompt, std::span<const int> draft = {});
     void decode_draft(std::span<const int> prefix, std::span<const int> draft);
     void rewind_cache(std::size_t position);
@@ -58,6 +59,7 @@ private:
     std::vector<int> window_;
     // Indexed by padding position, including skipped entries (-1).
     std::vector<int> draft_;
+    std::vector<PaddingEntry> draft_padding_;
     Clock::time_point last_touch_ = Clock::time_point::min();
 };
 

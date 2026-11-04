@@ -128,30 +128,34 @@ std::vector<PredictResult> PredictionEngine::predict(
     std::vector<PredictResult> results(padding.size());
     if (!needs_logits) {
         draft_.clear();
+        draft_padding_.clear();
         return results;
     }
 
+    struct Speculation {
+        std::vector<int> tokens;
+        std::size_t drafted = 0;
+    };
+
+    const auto draft = aligned_draft(padding);
     // Only feed a contiguous, valid draft. The last prediction's token is
     // never needed as input, matching the ordinary AR cache layout.
     const auto speculation = [&](std::size_t first) {
-        std::vector<int> tokens;
-        tokens.reserve(last_prediction - std::min(first, last_prediction));
-        bool has_draft = false;
+        Speculation result;
+        result.tokens.reserve(last_prediction - std::min(first, last_prediction));
         for (std::size_t index = first; index < last_prediction; ++index) {
             const auto& entry = prepared[index];
             if (padding[index].is_chosen) {
-                if (entry.chosen >= 0) tokens.push_back(entry.chosen);
+                if (entry.chosen >= 0) result.tokens.push_back(entry.chosen);
             } else if (!entry.tokens.empty()) {
-                if (index >= draft_.size() ||
-                    std::ranges::find(entry.tokens, draft_[index]) == entry.tokens.end()) {
+                if (std::ranges::find(entry.tokens, draft[index]) == entry.tokens.end()) {
                     break;
                 }
-                tokens.push_back(draft_[index]);
-                has_draft = true;
+                result.tokens.push_back(draft[index]);
+                ++result.drafted;
             }
         }
-        if (!has_draft) tokens.clear();
-        return tokens;
+        return result;
     };
 
     std::vector<int> next_draft(padding.size(), -1);
@@ -161,10 +165,10 @@ std::vector<PredictResult> PredictionEngine::predict(
     std::size_t ar_predictions = 0;
     try {
         auto continuation = speculation(0);
-        align_cache(prompt, continuation);
-        bool verifying = !continuation.empty();
-        if (verifying) {
-            drafted += continuation.size();
+        align_cache(prompt, continuation.tokens);
+        bool verifying = !continuation.tokens.empty();
+        if (continuation.drafted > 0) {
+            drafted += continuation.drafted;
             ++verify_batches;
         }
         std::size_t base = prompt.size();
@@ -178,7 +182,6 @@ std::vector<PredictResult> PredictionEngine::predict(
                 if (entry.chosen >= 0) {
                     if (verifying) {
                         ++row;
-                        ++accepted;
                     } else {
                         pending.push_back(entry.chosen);
                     }
@@ -189,14 +192,14 @@ std::vector<PredictResult> PredictionEngine::predict(
                 continue;
             }
             if (!verifying) {
-                continuation = pending.empty() ? std::vector<int>{} : speculation(index);
-                if (continuation.empty()) {
+                continuation = pending.empty() ? Speculation{} : speculation(index);
+                if (continuation.tokens.empty()) {
                     decode(pending);
                     ++ar_predictions;
                 } else {
                     base = cached_.size() + pending.size();
-                    decode_draft(pending, continuation);
-                    drafted += continuation.size();
+                    decode_draft(pending, continuation.tokens);
+                    drafted += continuation.drafted;
                     ++verify_batches;
                     verifying = true;
                     row = 0;
@@ -211,11 +214,11 @@ std::vector<PredictResult> PredictionEngine::predict(
             }
             const auto prediction = probabilities.front().first;
             next_draft[index] = prediction;
-            if (verifying && row < continuation.size() && prediction == continuation[row]) {
+            if (verifying && row < continuation.tokens.size() && prediction == continuation.tokens[row]) {
                 ++row;
                 ++accepted;
             } else {
-                if (verifying && row < continuation.size()) {
+                if (verifying && row < continuation.tokens.size()) {
                     // The current row has the correct prefix. Discard the
                     // wrong draft token and every KV entry depending on it.
                     rewind_cache(base + row);
@@ -225,6 +228,7 @@ std::vector<PredictResult> PredictionEngine::predict(
             }
         }
         draft_ = std::move(next_draft);
+        draft_padding_ = padding;
     } catch (...) {
         reset();
         throw;
@@ -249,6 +253,7 @@ void PredictionEngine::reset() noexcept {
     cached_.clear();
     window_.clear();
     draft_.clear();
+    draft_padding_.clear();
     backend_->clear();
 }
 
@@ -268,6 +273,22 @@ std::size_t PredictionEngine::select_window(std::span<const int> context) const 
         return best_start;
     }
     return context.size() > refresh_window_length ? boundary_cut(context) : 0;
+}
+
+std::vector<int> PredictionEngine::aligned_draft(const std::vector<PaddingEntry>& padding) const {
+    std::vector<int> aligned(padding.size(), -1);
+    const auto limit = std::min(padding.size(), draft_padding_.size());
+    const auto prefix = static_cast<std::size_t>(
+        std::ranges::mismatch(padding, draft_padding_).in1 - padding.begin());
+    std::size_t suffix = 0;
+    while (suffix < limit - prefix &&
+           padding[padding.size() - 1 - suffix] == draft_padding_[draft_padding_.size() - 1 - suffix]) {
+        ++suffix;
+    }
+    std::copy_n(draft_.begin(), prefix, aligned.begin());
+    std::copy_n(draft_.end() - static_cast<std::ptrdiff_t>(suffix), suffix,
+        aligned.end() - static_cast<std::ptrdiff_t>(suffix));
+    return aligned;
 }
 
 std::size_t PredictionEngine::boundary_cut(std::span<const int> context) const {

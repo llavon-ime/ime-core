@@ -25,6 +25,8 @@ struct PaddingEntry {
     bool is_chosen;
     char32_t chosen_char = 0;
     std::u16string bpmf;
+
+    bool operator==(const PaddingEntry&) const = default;
 };
 
 class Tokenizer {
