@@ -4,8 +4,11 @@ The `ggml` overlay pins the Llavon fork commit used by ime-core. Backend and
 vcpkg compatibility changes live on the fork's
 `feature/configurable-vulkan-pipeline-cache` branch. Host-only pipeline
 preparation is included in fork commit
-`80b8081c627deee05ebcf377f64746b58b4b82c7`, so the overlay uses that source
-directly without a local ggml preparation patch.
+`80b8081c627deee05ebcf377f64746b58b4b82c7`. The overlay pins
+`4b55751aaf6f2558bd5d895fe0472532ad8ed39f`, which also makes Vulkan shader
+generation start glslc with posix_spawn and fail the build when any shader
+cannot be compiled, instead of leaving shaders out and failing at link time.
+The overlay uses that source directly without a local ggml patch.
 
 The `llama-cpp` overlay pins the organization's `llavon-ime/llama.cpp` fork at
 `8bc5e47a6e8f69f71d781e985f0327e00e0ff881`, on
